@@ -204,21 +204,26 @@ async function sendBotChatMessage(clubId: string, bot: { uid: string; displayNam
 //  Bot activity yangilash (cron tomonidan chaqiriladi)
 // ─────────────────────────────────────────────
 export async function refreshBotActivityJob(): Promise<void> {
-  const hour  = new Date().getUTCHours();
-  const batch = db().batch();
-  let count   = 0;
+  const hour = new Date().getUTCHours();
+  let count  = 0;
 
   for (const bot of BOT_PROFILES) {
-    const isActive = bot.activeHours.includes(hour);
-    batch.update(db().collection("users").doc(bot.uid), {
-      isOnline:   isActive,
-      lastSeenAt: isActive ? Date.now() : Date.now() - Math.floor(Math.random() * 3600000),
-    });
-    count++;
-    if (count % 400 === 0) await batch.commit();
+    try {
+      const snap = await db().collection("users").doc(bot.uid).get();
+      if (!snap.exists) {
+        await seedBotToFirestore(bot);
+      }
+      const isActive = bot.activeHours.includes(hour);
+      await db().collection("users").doc(bot.uid).update({
+        isOnline:   isActive,
+        lastSeenAt: isActive ? Date.now() : Date.now() - Math.floor(Math.random() * 3600000),
+      });
+      count++;
+    } catch {
+      // skip
+    }
   }
-  if (count > 0) await batch.commit();
-  console.log(`Refreshed activity for ${BOT_PROFILES.length} bots at hour ${hour}`);
+  console.log(`Refreshed activity for ${count} bots at hour ${hour}`);
 }
 
 // ─────────────────────────────────────────────
