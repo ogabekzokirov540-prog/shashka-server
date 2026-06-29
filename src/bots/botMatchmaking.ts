@@ -4,7 +4,7 @@
 // ─────────────────────────────────────────────
 import * as admin from "firebase-admin";
 import { BOT_PROFILES, BotProfile } from "./botProfiles";
-import { makeBotMove, seedBotToFirestore } from "./botEngine";
+import { makeBotMoveNewFormat, seedBotToFirestore } from "./botEngine";
 import { levelFromXp } from "../config";
 
 const db  = () => admin.firestore();
@@ -49,7 +49,7 @@ export function scheduleBotsForMatchmaking(
   rating: number,
   stakeCoin: number
 ): void {
-  // 30 soniya kutish
+  // 10 soniya kutish
   const timer = setTimeout(async () => {
     activeBotTimers.delete(roomId);
     try {
@@ -88,7 +88,7 @@ export function scheduleBotsForMatchmaking(
     } catch (err) {
       console.error("scheduleBotsForMatchmaking error:", err);
     }
-  }, 30000);
+  }, 10000);
 
   activeBotTimers.set(roomId, timer);
 }
@@ -139,14 +139,7 @@ export function startBotGameListener(): void {
       const currentSnap = await rdb().ref(`rooms/${roomId}/gameState/currentTurn`).get();
       if (currentSnap.val() !== botColor) return;
 
-      await makeBotMove(roomId, botUid, botColor, botProfile.style);
-
-      // O'yin tugaganini tekshirish
-      const finalSnap  = await rdb().ref(`rooms/${roomId}/gameState`).get();
-      const finalState = finalSnap.val();
-      if (finalState?.isGameOver) {
-        await handleBotGameOver(roomId, room, botUid, finalState.winner);
-      }
+      await makeBotMoveNewFormat(roomId, botColor, botProfile.style);
     } catch (err) {
       console.error("startBotGameListener error:", err);
     }

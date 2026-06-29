@@ -229,3 +229,80 @@ export async function makeBotMove(roomId: string, botUid: string, botColor: stri
     mustCaptureFrom: null,
   });
 }
+
+// ── Yangi format uchun bot harakat (row_col key format) ────────
+export async function makeBotMoveNewFormat(roomId: string, botColor: string, style: BotStyle): Promise<void> {
+  const gameStateSnap = await rdb().ref(`rooms/${roomId}/gameState`).get();
+  if (!gameStateSnap.exists()) return;
+
+  const gs = gameStateSnap.val();
+  if (!gs || gs.isGameOver) return;
+  if (gs.currentTurn !== botColor) return;
+
+  // row_col formatdan 2D board ga o'tkazish
+  const board: Board = Array.from({length: 8}, () =>
+    Array.from({length: 8}, () => ({ piece: null as { color: string; isKing: boolean } | null }))
+  );
+
+  const boardData = gs.board || {};
+  for (const [key, val] of Object.entries(boardData)) {
+    const parts = key.split('_');
+    if (parts.length !== 2) continue;
+    const row = parseInt(parts[0]);
+    const col = parseInt(parts[1]);
+    if (isNaN(row) || isNaN(col)) continue;
+    const cellVal = val as { color: string; type: string };
+    board[row][col].piece = {
+      color: cellVal.color,
+      isKing: cellVal.type === 'KING'
+    };
+  }
+
+  const moves = getValidMovesForColor(board, botColor);
+  if (moves.length === 0) {
+    await rdb().ref(`rooms/${roomId}/gameState`).update({
+      isGameOver: true,
+      winner: botColor === 'WHITE' ? 'BLACK' : 'WHITE',
+    });
+    return;
+  }
+
+  const move = selectBotMove(moves, style, board, botColor);
+
+  // Harakatni apply qilish
+  const piece = board[move.from.row][move.from.col].piece!;
+  board[move.from.row][move.from.col].piece = null;
+  move.captured.forEach(c => { board[c.row][c.col].piece = null; });
+
+  const becomeKing = !piece.isKing &&
+    ((piece.color === 'WHITE' && move.to.row === 0) ||
+     (piece.color === 'BLACK' && move.to.row === 7));
+  board[move.to.row][move.to.col].piece = { ...piece, isKing: piece.isKing || becomeKing };
+
+  // 2D board dan row_col formatga qaytarish
+  const newBoardData: Record<string, { color: string; type: string }> = {};
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const p = board[r][c].piece;
+      if (p) {
+        newBoardData[`${r}_${c}`] = {
+          color: p.color,
+          type: p.isKing ? 'KING' : 'MAN'
+        };
+      }
+    }
+  }
+
+  const whitePieces = Object.values(newBoardData).filter(p => p.color === 'WHITE').length;
+  const blackPieces = Object.values(newBoardData).filter(p => p.color === 'BLACK').length;
+  const isGameOver = whitePieces === 0 || blackPieces === 0;
+  const winner = whitePieces === 0 ? 'BLACK' : blackPieces === 0 ? 'WHITE' : null;
+  const oppColor = botColor === 'WHITE' ? 'BLACK' : 'WHITE';
+
+  await rdb().ref(`rooms/${roomId}/gameState`).update({
+    board: newBoardData,
+    currentTurn: isGameOver ? botColor : oppColor,
+    isGameOver,
+    winner,
+  });
+}
