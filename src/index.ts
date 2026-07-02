@@ -36,6 +36,25 @@ app.use("/matchmaking", matchmakingRouter);
 app.use("/user",        userRouter);
 app.use("/club",        clubRouter);
 
+// One-time admin endpoint — bot ratinglarini reset qilish
+app.post("/admin/reset-bot-ratings", async (req, res) => {
+  const token = req.headers.authorization?.replace("Bearer ", "");
+  if (token !== process.env.ADMIN_SEED_TOKEN) {
+    res.status(403).json({ error: "forbidden" });
+    return;
+  }
+  try {
+    const db = admin.firestore();
+    const bots = await db.collection("users").where("isBot", "==", true).get();
+    const batch = db.batch();
+    bots.forEach(d => batch.update(d.ref, { rating: 0, peakRating: 0 }));
+    await batch.commit();
+    res.json({ ok: true, count: bots.size });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // Health check
 app.get("/health", (_req, res) => {
   res.json({ ok: true, ts: Date.now() });
