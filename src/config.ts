@@ -13,9 +13,16 @@ export const XP_WIN  = 30;
 export const XP_LOSS = 10;
 export const XP_DRAW = 15;
 
+export const ELO_K_FACTOR = 32;
 export const ELO_WIN  =  25;
 export const ELO_LOSS = -15;
 export const ELO_DRAW =   0;
+
+// Real ELO hisoblash
+export function calcElo(myRating: number, opponentRating: number, score: number): number {
+  const expected = 1 / (1 + Math.pow(10, (opponentRating - myRating) / 400));
+  return Math.round(ELO_K_FACTOR * (score - expected));
+}
 
 export const WIN_BASE_BONUS = 20;
 

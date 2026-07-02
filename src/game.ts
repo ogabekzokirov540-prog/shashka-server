@@ -5,9 +5,8 @@ import { Router, Response } from "express";
 import * as admin from "firebase-admin";
 import {
   XP_WIN, XP_LOSS, XP_DRAW,
-  ELO_WIN, ELO_LOSS,
   WIN_BASE_BONUS, VALID_STAKES,
-  levelFromXp,
+  levelFromXp, calcElo,
 } from "./config";
 import { GameResult, UserDoc } from "./types";
 import { requireAuth, AuthRequest } from "./middleware";
@@ -78,9 +77,17 @@ router.post("/submit", requireAuth, async (req: AuthRequest, res: Response): Pro
       console.warn("Result conflict", { roomId, callerUid, result, opponentResult });
     }
 
+    // Ikki o'yinchining ratingini olish
+    const [callerSnap, opponentSnap] = await Promise.all([
+      db().collection("users").doc(callerUid).get(),
+      db().collection("users").doc(opponentUid).get(),
+    ]);
+    const callerRating   = (callerSnap.data()   as UserDoc)?.rating ?? 0;
+    const opponentRating = (opponentSnap.data() as UserDoc)?.rating ?? 0;
+
     const batch = db().batch();
-    await applyResult(batch, callerUid,   result,         stake);
-    await applyResult(batch, opponentUid, opponentResult, stake);
+    await applyResult(batch, callerUid,   result,         stake, callerRating,   opponentRating);
+    await applyResult(batch, opponentUid, opponentResult, stake, opponentRating, callerRating);
 
     batch.update(roomRef, {
       status:    "FINISHED",
@@ -112,7 +119,9 @@ async function applyResult(
   batch: FirebaseFirestore.WriteBatch,
   uid: string,
   result: GameResult,
-  stake: number
+  stake: number,
+  myRating: number,
+  opponentRating: number
 ): Promise<void> {
   const userRef  = db().collection("users").doc(uid);
   const userSnap = await userRef.get();
@@ -128,19 +137,19 @@ async function applyResult(
     case "win":
       coinsDelta = stake > 0 ? stake * 2 + WIN_BASE_BONUS : WIN_BASE_BONUS;
       xpGain     = XP_WIN;
-      eloDelta   = ELO_WIN;
+      eloDelta   = calcElo(myRating, opponentRating, 1);
       streakNew  = user.currentWinStreak + 1;
       break;
     case "loss":
       coinsDelta = stake > 0 ? -stake : 0;
       xpGain     = XP_LOSS;
-      eloDelta   = ELO_LOSS;
+      eloDelta   = calcElo(myRating, opponentRating, 0);
       streakNew  = 0;
       break;
     case "draw":
       coinsDelta = 0;
       xpGain     = XP_DRAW;
-      eloDelta   = 0;
+      eloDelta   = calcElo(myRating, opponentRating, 0.5);
       streakNew  = 0;
       break;
   }
