@@ -139,13 +139,92 @@ export function startBotGameListener(): void {
       const currentSnap = await rdb().ref(`rooms/${roomId}/gameState/currentTurn`).get();
       if (currentSnap.val() !== botColor) return;
 
+      // Bot yurishidan oldin board ni saqlash
+      const prevBoardSnap = await rdb().ref(`rooms/${roomId}/gameState/board`).get();
+      const prevBoard = prevBoardSnap.val() || {};
+
       await makeBotMoveNewFormat(roomId, botColor, botProfile.style);
+
+      // Bot yurishi tugagandan keyin harakat ni saqlash
+      const newBoardSnap = await rdb().ref(`rooms/${roomId}/gameState/board`).get();
+      const newBoard = newBoardSnap.val() || {};
+
+      // Farqni topib move sifatida saqlash
+      let fromKey = "", toKey = "";
+      for (const key of Object.keys(prevBoard)) {
+        if (!newBoard[key] && prevBoard[key]?.color === botColor) { fromKey = key; break; }
+      }
+      for (const key of Object.keys(newBoard)) {
+        if (!prevBoard[key] && newBoard[key]?.color === botColor) { toKey = key; break; }
+      }
+
+      if (fromKey && toKey) {
+        const [fr, fc] = fromKey.split("_").map(Number);
+        const [tr, tc] = toKey.split("_").map(Number);
+        const moveCountSnap = await rdb().ref(`rooms/${roomId}/moves`).get();
+        const moveCount = moveCountSnap.exists() ? Object.keys(moveCountSnap.val()).length : 0;
+        await rdb().ref(`rooms/${roomId}/moves`).push({
+          fromRow: fr, fromCol: fc, toRow: tr, toCol: tc,
+          color: botColor, moveNumber: moveCount, timestamp: Date.now()
+        });
+      }
+
+      // O'yin tugaganini tekshirish va replay saqlash
+      const finalGsSnap = await rdb().ref(`rooms/${roomId}/gameState`).get();
+      const finalGs = finalGsSnap.val();
+      if (finalGs?.isGameOver) {
+        await saveReplayForBotGame(roomId, room, botUid, finalGs.winner);
+      }
+
     } catch (err) {
       console.error("startBotGameListener error:", err);
     }
   });
 
   console.log("Bot game listener started");
+}
+
+async function saveReplayForBotGame(
+  roomId: string,
+  room: Record<string, unknown>,
+  botUid: string,
+  winner: string | null
+): Promise<void> {
+  try {
+    const playerUid = room.player1Uid === botUid ? room.player2Uid as string : room.player1Uid as string;
+    if (!playerUid) return;
+
+    const movesSnap = await rdb().ref(`rooms/${roomId}/moves`).get();
+    if (!movesSnap.exists()) return;
+
+    const movesRaw = movesSnap.val();
+    const moves = Object.values(movesRaw).sort((a: any, b: any) => (a.moveNumber ?? 0) - (b.moveNumber ?? 0));
+
+    const playerSnap = await db().collection("users").doc(playerUid).get();
+    const botSnap = await db().collection("users").doc(botUid).get();
+    const playerName = playerSnap.data()?.displayName ?? "Player";
+    const botName = botSnap.data()?.displayName ?? "Bot";
+
+    const playerColor = room.player1Uid === playerUid ? "WHITE" : "BLACK";
+    const playerResult = winner === null ? "draw" : winner === playerColor ? "win" : "loss";
+
+    await db().collection("replays").doc(playerUid).collection("games").add({
+      roomId,
+      myColor: playerColor,
+      myName: playerName,
+      opponentName: botName,
+      result: playerResult,
+      winner: winner ?? "draw",
+      moves,
+      totalMoves: moves.length,
+      playedAt: Date.now(),
+      isBotGame: true,
+    });
+
+    console.log(`Replay saved for player ${playerUid}, result: ${playerResult}`);
+  } catch (err) {
+    console.error("saveReplayForBotGame error:", err);
+  }
 }
 
 // ─────────────────────────────────────────────
