@@ -117,7 +117,8 @@ export function startBotGameListener(): void {
       if (!room || !room.isBotGame || !room.botUid) return;
       if (room.status !== "PLAYING") return;
 
-      const roomId  = room.roomId as string;
+      const roomId = snapshot.key as string;
+      if (!roomId) return;
       const botUid  = room.botUid as string;
       const botColor = room.player2Uid === botUid ? "BLACK" : "WHITE";
 
