@@ -156,7 +156,7 @@ async function applyResult(
 
   const newXp      = user.xp + xpGain;
   const newLevel   = levelFromXp(newXp);
-  const newRating  = Math.max(0, user.rating + eloDelta);
+  const newRating  = Math.max(-100, user.rating + eloDelta);
   const newPeak    = Math.max(user.peakRating ?? 0, newRating);
   const newLongest = Math.max(user.longestWinStreak ?? 0, streakNew);
 

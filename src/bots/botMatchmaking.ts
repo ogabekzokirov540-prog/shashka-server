@@ -142,6 +142,13 @@ export function startBotGameListener(): void {
 
       await makeBotMoveNewFormat(roomId, botColor, botProfile.style);
 
+      // O'yin tugaganini tekshirish
+      const finalGs = await rdb().ref(`rooms/${roomId}/gameState`).get();
+      const gs2 = finalGs.val();
+      if (gs2?.isGameOver) {
+        await handleBotGameOver(roomId, room, botUid, gs2.winner ?? null);
+      }
+
     } catch (err) {
       console.error("startBotGameListener error:", err);
     }
