@@ -36,6 +36,30 @@ app.use("/matchmaking", matchmakingRouter);
 app.use("/user",        userRouter);
 app.use("/club",        clubRouter);
 
+// One-time admin endpoint — bot ratinglarini profile dan yangilash
+app.post("/admin/sync-bot-ratings", async (req, res) => {
+  const token = req.headers.authorization?.replace("Bearer ", "");
+  if (token !== process.env.ADMIN_SEED_TOKEN) {
+    res.status(403).json({ error: "forbidden" });
+    return;
+  }
+  try {
+    const { BOT_PROFILES } = require("./dist/bots/botProfiles");
+    const db = admin.firestore();
+    const batch = db.batch();
+    let count = 0;
+    for (const bot of BOT_PROFILES) {
+      const ref = db.collection("users").doc(bot.uid);
+      batch.update(ref, { rating: bot.rating, peakRating: bot.rating });
+      count++;
+    }
+    await batch.commit();
+    res.json({ ok: true, count });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // One-time admin endpoint — bot ratinglarini reset qilish
 app.post("/admin/reset-bot-ratings", async (req, res) => {
   const token = req.headers.authorization?.replace("Bearer ", "");
