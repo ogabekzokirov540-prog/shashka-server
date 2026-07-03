@@ -44,7 +44,6 @@ app.post("/admin/sync-bot-ratings", async (req, res) => {
     return;
   }
   try {
-    const { BOT_PROFILES } = require("./dist/bots/botProfiles");
     const db = admin.firestore();
     const batch = db.batch();
     let count = 0;
