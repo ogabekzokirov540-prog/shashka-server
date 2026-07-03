@@ -11,6 +11,7 @@ import userRouter        from "./user";
 import clubRouter        from "./club";
 
 import { refreshBotActivityJob, seedAllBotsJob } from "./bots/botClub";
+import { BOT_PROFILES } from "./bots/botProfiles";
 import { cleanupMatchmakingJob }  from "./matchmaking";
 import { cleanupOfflineUsersJob } from "./user";
 
