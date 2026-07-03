@@ -5,7 +5,7 @@
 import * as admin from "firebase-admin";
 import { BOT_PROFILES, BotProfile } from "./botProfiles";
 import { makeBotMoveNewFormat, seedBotToFirestore } from "./botEngine";
-import { levelFromXp } from "../config";
+import { levelFromXp, calcElo } from "../config";
 
 const db  = () => admin.firestore();
 const rdb = () => admin.database();
@@ -171,19 +171,33 @@ async function handleBotGameOver(
   if (!playerSnap.exists) return;
   const player = playerSnap.data()!;
 
+  // Bot ratingini ham olish
+  const botRef  = db().collection("users").doc(botUid);
+  const botSnap = await botRef.get();
+  const botRating = botSnap.data()?.rating ?? 0;
+  const playerRating = player.rating ?? 0;
+
   if (isDraw) {
+    const eloDelta = calcElo(playerRating, botRating, 0.5);
+    const botEloDelta = calcElo(botRating, playerRating, 0.5);
+    const newRating = Math.max(-100, playerRating + eloDelta);
     const update: Record<string, unknown> = {
       draws:            admin.firestore.FieldValue.increment(1),
       totalGames:       admin.firestore.FieldValue.increment(1),
       xp:               admin.firestore.FieldValue.increment(15),
       level:            levelFromXp(player.xp + 15),
       currentWinStreak: 0,
+      rating:           newRating,
+      peakRating:       Math.max(player.peakRating ?? 0, newRating),
     };
     if (stake > 0) update.totalCoinsWagered = admin.firestore.FieldValue.increment(stake);
     await playerRef.update(update);
+    await botRef.update({ rating: Math.max(-100, botRating + botEloDelta) }).catch(() => {});
   } else if (playerWon) {
+    const eloDelta   = calcElo(playerRating, botRating, 1);
+    const botEloDelta = calcElo(botRating, playerRating, 0);
     const coinsDelta = stake > 0 ? stake * 2 + 20 : 20;
-    const newRating  = Math.min(3000, player.rating + 25);
+    const newRating  = Math.max(-100, playerRating + eloDelta);
     const newXp      = player.xp + 30;
     const newLevel   = levelFromXp(newXp);
     const newStreak  = (player.currentWinStreak ?? 0) + 1;
@@ -200,6 +214,7 @@ async function handleBotGameOver(
       currentWinStreak: newStreak,
       longestWinStreak: Math.max(player.longestWinStreak ?? 0, newStreak),
     });
+    await botRef.update({ rating: Math.max(-100, botRating + botEloDelta) }).catch(() => {});
     if (player.clubId) {
       await db().collection("clubs").doc(player.clubId).update({
         totalWins:  admin.firestore.FieldValue.increment(1),
@@ -208,8 +223,10 @@ async function handleBotGameOver(
       }).catch(() => {});
     }
   } else {
+    const eloDelta   = calcElo(playerRating, botRating, 0);
+    const botEloDelta = calcElo(botRating, playerRating, 1);
     const coinsDelta = stake > 0 ? -stake : 0;
-    const newRating  = Math.max(0, player.rating - 15);
+    const newRating  = Math.max(-100, playerRating + eloDelta);
     const newXp      = player.xp + 10;
     await playerRef.update({
       losses:           admin.firestore.FieldValue.increment(1),
@@ -221,21 +238,11 @@ async function handleBotGameOver(
       rating:           newRating,
       currentWinStreak: 0,
     });
-  }
-
-  // Bot statistikasi
-  const botRef  = db().collection("users").doc(botUid);
-  const botSnap = await botRef.get();
-  if (botSnap.exists) {
-    if (!isDraw) {
-      if (playerWon) {
-        await botRef.update({ losses: admin.firestore.FieldValue.increment(1), totalGames: admin.firestore.FieldValue.increment(1), rating: admin.firestore.FieldValue.increment(-15) });
-      } else {
-        await botRef.update({ wins: admin.firestore.FieldValue.increment(1), totalGames: admin.firestore.FieldValue.increment(1), rating: admin.firestore.FieldValue.increment(25) });
-      }
-    } else {
-      await botRef.update({ draws: admin.firestore.FieldValue.increment(1), totalGames: admin.firestore.FieldValue.increment(1) });
-    }
+    await botRef.update({
+      wins: admin.firestore.FieldValue.increment(1),
+      totalGames: admin.firestore.FieldValue.increment(1),
+      rating: Math.max(-100, botRating + botEloDelta)
+    }).catch(() => {});
   }
 
   await rdb().ref(`rooms/${roomId}`).update({ status: "FINISHED", finishedAt: Date.now() });
