@@ -210,7 +210,14 @@ export function selectBotMove(moves: Move[], style: BotStyle, board: Board, botC
 export async function seedBotToFirestore(bot: BotProfile): Promise<void> {
   const ref = db().collection("users").doc(bot.uid);
   const snap = await ref.get();
-  if (snap.exists) return;
+  if (snap.exists) {
+    // Eski seed'da rating 0 bo'lib qolgan botlarni bir marta to'g'irlaymiz
+    const cur = snap.data()!;
+    if ((cur.rating ?? 0) === 0 && bot.rating !== 0) {
+      await ref.update({ rating: bot.rating, peakRating: Math.max(bot.rating, 0) });
+    }
+    return;
+  }
 
   await ref.set({
     uid:              bot.uid,
@@ -230,8 +237,8 @@ export async function seedBotToFirestore(bot: BotProfile): Promise<void> {
     totalCoinsWon:    bot.wins * 380,
     currentWinStreak: Math.floor(Math.random() * 5),
     longestWinStreak: Math.floor(bot.wins / 10),
-    rating:           0,
-    peakRating:       0,
+    rating:           bot.rating,
+    peakRating:       Math.max(bot.rating, 0),
     clubId:           "",
     clubName:         "",
     clubRole:         "MEMBER",
