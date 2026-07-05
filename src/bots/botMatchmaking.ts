@@ -79,6 +79,8 @@ export function scheduleBotsForMatchmaking(
         player2Uid:    bot.uid,
         player2Name:   bot.displayName,
         player2Avatar: botUser.avatarId ?? "avatar_01",
+        player2Rating: botUser.rating ?? 0,
+        player2Level:  botUser.level ?? 1,
         status:        "PLAYING",
         isBotGame:     true,
         botUid:        bot.uid,

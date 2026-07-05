@@ -66,6 +66,8 @@ router.post("/find", requireAuth, async (req: AuthRequest, res: Response): Promi
         player2Uid:    uid,
         player2Name:   user.displayName ?? "",
         player2Avatar: user.avatarId ?? "avatar_01",
+        player2Rating: user.rating ?? 0,
+        player2Level:  user.level ?? 1,
         status:        "PLAYING",
       });
       res.json({ roomId: foundRoomId, isHost: false });
@@ -78,6 +80,8 @@ router.post("/find", requireAuth, async (req: AuthRequest, res: Response): Promi
       player1Uid:    uid,
       player1Name:   user.displayName ?? "",
       player1Avatar: user.avatarId ?? "avatar_01",
+      player1Rating: user.rating ?? 0,
+      player1Level:  user.level ?? 1,
       player2Uid:    "",
       player2Name:   "",
       player2Avatar: "default",
