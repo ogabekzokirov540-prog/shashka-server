@@ -1,5 +1,15 @@
 // ─────────────────────────────────────────────
-//  O'yin natijalari
+//  O'yin natijalari (anti-cheat versiya)
+//
+//  O'zgarishlar:
+//  1. Natijalar MOS KELMASA (masalan ikkalasi ham "win") — hech kimga
+//     tanga/XP/reyting berilmaydi, xona DISPUTED deb belgilanadi.
+//     (Eski kod faqat console.warn qilib, baribir to'lab yuborardi.)
+//  2. Butun hisob-kitob Firestore transaction ichida — ikkala so'rov
+//     bir vaqtda kelsa ham faqat BIR marta hisoblanadi.
+//  3. Tanga formulasi to'g'irlandi: matchmaking'da tikuv yechilmaydi,
+//     shuning uchun g'olib +stake oladi (stake*2 emas!), yutqazgan -stake.
+//     Eski formula har o'yinda tizimga havodan +stake tanga qo'shardi.
 // ─────────────────────────────────────────────
 import { Router, Response } from "express";
 import * as admin from "firebase-admin";
@@ -14,6 +24,11 @@ import { requireAuth, AuthRequest } from "./middleware";
 const router = Router();
 const db = () => admin.firestore();
 
+type SubmitOutcome = {
+  code: number;
+  body: Record<string, unknown>;
+};
+
 // POST /game/submit
 router.post("/submit", requireAuth, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -25,106 +40,121 @@ router.post("/submit", requireAuth, async (req: AuthRequest, res: Response): Pro
       return;
     }
 
-    const roomRef  = db().collection("rooms").doc(roomId);
-    const roomSnap = await roomRef.get();
-    if (!roomSnap.exists) {
-      res.status(404).json({ error: "not-found", message: "Room not found" });
-      return;
-    }
+    const roomRef = db().collection("rooms").doc(roomId);
 
-    const room = roomSnap.data()!;
+    const outcome: SubmitOutcome = await db().runTransaction(async (tx) => {
+      // ── 1. Barcha o'qishlar (Firestore tx qoidasi: avval read, keyin write) ──
+      const roomSnap = await tx.get(roomRef);
+      if (!roomSnap.exists) {
+        return { code: 404, body: { error: "not-found", message: "Room not found" } };
+      }
 
-    if (room.player1Uid !== callerUid && room.player2Uid !== callerUid) {
-      res.status(403).json({ error: "permission-denied", message: "Not your game" });
-      return;
-    }
+      const room = roomSnap.data()!;
 
-    if (room.status === "FINISHED") {
-      res.json({ ok: true, message: "Already finished" });
-      return;
-    }
+      if (room.player1Uid !== callerUid && room.player2Uid !== callerUid) {
+        return { code: 403, body: { error: "permission-denied", message: "Not your game" } };
+      }
 
-    const stake: number = room.stakeCoin ?? 0;
-    if (stake > 0 && !VALID_STAKES.includes(stake)) {
-      res.status(400).json({ error: "invalid-argument", message: "Invalid stake amount" });
-      return;
-    }
+      if (room.status === "FINISHED" || room.status === "DISPUTED") {
+        return { code: 200, body: { ok: true, message: "Already finished" } };
+      }
 
-    const opponentUid = room.player1Uid === callerUid ? room.player2Uid : room.player1Uid;
+      const stake: number = room.stakeCoin ?? 0;
+      if (stake > 0 && !VALID_STAKES.includes(stake)) {
+        return { code: 400, body: { error: "invalid-argument", message: "Invalid stake amount" } };
+      }
 
-    const resultRef = roomRef.collection("results").doc(callerUid);
-    const existingResult = await resultRef.get();
-    if (existingResult.exists) {
-      res.json({ ok: true, message: "Already submitted" });
-      return;
-    }
-    await resultRef.set({ result, submittedAt: Date.now() });
+      const opponentUid =
+        room.player1Uid === callerUid ? room.player2Uid : room.player1Uid;
 
-    const opponentResultSnap = await roomRef.collection("results").doc(opponentUid).get();
-    if (!opponentResultSnap.exists) {
-      res.json({ ok: true, message: "Waiting for opponent result" });
-      return;
-    }
+      const myResultRef  = roomRef.collection("results").doc(callerUid);
+      const oppResultRef = roomRef.collection("results").doc(opponentUid);
 
-    const opponentResult = opponentResultSnap.data()!.result as GameResult;
+      const [mySnap, oppSnap, callerUserSnap, oppUserSnap] = await Promise.all([
+        tx.get(myResultRef),
+        tx.get(oppResultRef),
+        tx.get(db().collection("users").doc(callerUid)),
+        tx.get(db().collection("users").doc(opponentUid)),
+      ]);
 
-    const isConsistent =
-      (result === "win"  && opponentResult === "loss") ||
-      (result === "loss" && opponentResult === "win")  ||
-      (result === "draw" && opponentResult === "draw");
+      if (mySnap.exists) {
+        return { code: 200, body: { ok: true, message: "Already submitted" } };
+      }
 
-    if (!isConsistent) {
-      console.warn("Result conflict", { roomId, callerUid, result, opponentResult });
-    }
+      // ── 2. Yozishlar ──
+      tx.set(myResultRef, { result, submittedAt: Date.now() });
 
-    // Ikki o'yinchining ratingini olish
-    const [callerSnap, opponentSnap] = await Promise.all([
-      db().collection("users").doc(callerUid).get(),
-      db().collection("users").doc(opponentUid).get(),
-    ]);
-    const callerRating   = (callerSnap.data()   as UserDoc)?.rating ?? 0;
-    const opponentRating = (opponentSnap.data() as UserDoc)?.rating ?? 0;
+      if (!oppSnap.exists) {
+        return { code: 200, body: { ok: true, message: "Waiting for opponent result" } };
+      }
 
-    const batch = db().batch();
-    await applyResult(batch, callerUid,   result,         stake, callerRating,   opponentRating);
-    await applyResult(batch, opponentUid, opponentResult, stake, opponentRating, callerRating);
+      const opponentResult = oppSnap.data()!.result as GameResult;
 
-    batch.update(roomRef, {
-      status:    "FINISHED",
-      winnerId:  result === "win" ? callerUid : result === "loss" ? opponentUid : null,
-      finishedAt: Date.now(),
+      const isConsistent =
+        (result === "win"  && opponentResult === "loss") ||
+        (result === "loss" && opponentResult === "win")  ||
+        (result === "draw" && opponentResult === "draw");
+
+      if (!isConsistent) {
+        // ANTI-CHEAT: natijalar mos emas — hech kimga hech narsa berilmaydi.
+        console.warn("Result conflict — room DISPUTED", {
+          roomId, callerUid, result, opponentUid, opponentResult,
+        });
+        tx.update(roomRef, {
+          status: "DISPUTED",
+          disputedAt: Date.now(),
+          disputeInfo: {
+            [callerUid]: result,
+            [opponentUid]: opponentResult,
+          },
+        });
+        return { code: 200, body: { ok: true, disputed: true, message: "Result conflict — no rewards" } };
+      }
+
+      // ── 3. Mos natija — hisob-kitob ──
+      const callerRating   = (callerUserSnap.data()   as UserDoc)?.rating ?? 0;
+      const opponentRating = (oppUserSnap.data() as UserDoc)?.rating ?? 0;
+
+      applyResult(tx, callerUserSnap, result,         stake, callerRating,   opponentRating);
+      applyResult(tx, oppUserSnap,   opponentResult, stake, opponentRating, callerRating);
+
+      tx.update(roomRef, {
+        status: "FINISHED",
+        winnerId: result === "win" ? callerUid : result === "loss" ? opponentUid : null,
+        finishedAt: Date.now(),
+      });
+
+      // Klub statistikasi (g'olibning klubi bo'lsa)
+      if (result !== "draw") {
+        const winnerSnap = result === "win" ? callerUserSnap : oppUserSnap;
+        const clubId = winnerSnap.data()?.clubId as string | undefined;
+        if (clubId) {
+          tx.update(db().collection("clubs").doc(clubId), {
+            totalWins:  admin.firestore.FieldValue.increment(1),
+            totalGames: admin.firestore.FieldValue.increment(1),
+            weeklyWins: admin.firestore.FieldValue.increment(1),
+          });
+        }
+      }
+
+      return { code: 200, body: { ok: true } };
     });
 
-    if (result === "win") {
-      const userSnap = await db().collection("users").doc(callerUid).get();
-      const clubId = userSnap.data()?.clubId as string | undefined;
-      if (clubId) {
-        batch.update(db().collection("clubs").doc(clubId), {
-          totalWins:  admin.firestore.FieldValue.increment(1),
-          totalGames: admin.firestore.FieldValue.increment(1),
-          weeklyWins: admin.firestore.FieldValue.increment(1),
-        });
-      }
-    }
-
-    await batch.commit();
-    res.json({ ok: true });
+    res.status(outcome.code).json(outcome.body);
   } catch (err) {
     console.error("submitGameResult error:", err);
     res.status(500).json({ error: "internal", message: "Server error" });
   }
 });
 
-async function applyResult(
-  batch: FirebaseFirestore.WriteBatch,
-  uid: string,
+function applyResult(
+  tx: FirebaseFirestore.Transaction,
+  userSnap: FirebaseFirestore.DocumentSnapshot,
   result: GameResult,
   stake: number,
   myRating: number,
   opponentRating: number
-): Promise<void> {
-  const userRef  = db().collection("users").doc(uid);
-  const userSnap = await userRef.get();
+): void {
   if (!userSnap.exists) return;
   const user = userSnap.data() as UserDoc;
 
@@ -135,7 +165,10 @@ async function applyResult(
 
   switch (result) {
     case "win":
-      coinsDelta = stake > 0 ? stake * 2 + WIN_BASE_BONUS : WIN_BASE_BONUS;
+      // COIN FIX: tikuv matchmaking'da yechilmaydi, shuning uchun g'olib
+      // raqibdan +stake oladi (stake*2 EMAS — eski formula tizimga
+      // havodan tanga qo'shardi).
+      coinsDelta = stake > 0 ? stake + WIN_BASE_BONUS : WIN_BASE_BONUS;
       xpGain     = XP_WIN;
       eloDelta   = calcElo(myRating, opponentRating, 1);
       streakNew  = user.currentWinStreak + 1;
@@ -184,7 +217,7 @@ async function applyResult(
     update.totalCoinsWagered = admin.firestore.FieldValue.increment(stake);
   }
 
-  batch.update(userRef, update);
+  tx.update(userSnap.ref, update);
 }
 
 export default router;
