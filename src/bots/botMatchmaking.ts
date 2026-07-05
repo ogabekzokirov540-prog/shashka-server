@@ -49,7 +49,7 @@ export function scheduleBotsForMatchmaking(
   rating: number,
   stakeCoin: number
 ): void {
-  // 10 soniya kutish
+  // 25 soniya haqiqiy raqib kutiladi, topilmasa bot kiradi
   const timer = setTimeout(async () => {
     activeBotTimers.delete(roomId);
     try {
@@ -90,7 +90,7 @@ export function scheduleBotsForMatchmaking(
     } catch (err) {
       console.error("scheduleBotsForMatchmaking error:", err);
     }
-  }, 10000);
+  }, 25000);
 
   activeBotTimers.set(roomId, timer);
 }
