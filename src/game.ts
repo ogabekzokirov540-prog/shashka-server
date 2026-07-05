@@ -1,15 +1,15 @@
 // ─────────────────────────────────────────────
-//  O'yin natijalari (anti-cheat versiya)
+//  O'yin natijalari (anti-cheat versiya, v2)
 //
-//  O'zgarishlar:
-//  1. Natijalar MOS KELMASA (masalan ikkalasi ham "win") — hech kimga
-//     tanga/XP/reyting berilmaydi, xona DISPUTED deb belgilanadi.
-//     (Eski kod faqat console.warn qilib, baribir to'lab yuborardi.)
-//  2. Butun hisob-kitob Firestore transaction ichida — ikkala so'rov
-//     bir vaqtda kelsa ham faqat BIR marta hisoblanadi.
-//  3. Tanga formulasi to'g'irlandi: matchmaking'da tikuv yechilmaydi,
-//     shuning uchun g'olib +stake oladi (stake*2 emas!), yutqazgan -stake.
-//     Eski formula har o'yinda tizimga havodan +stake tanga qo'shardi.
+//  KRITIK FIX: xonalar matchmaking'da Realtime Database'da yaratiladi,
+//  lekin eski kod ularni Firestore'dan qidirardi — natijada har doim
+//  "Room not found" bo'lib, tanga/reyting HECH QACHON hisoblanmagan.
+//  Endi xona RTDB'dan o'qiladi.
+//
+//  Boshqa himoyalar (v1 dan):
+//  1. Natijalar mos kelmasa — hech kimga to'lov yo'q, xona DISPUTED.
+//  2. Hisob-kitob Firestore transaction'da — ikki marta hisoblanmaydi.
+//  3. Tanga formulasi: g'olib +stake (+bonus), yutqazgan -stake.
 // ─────────────────────────────────────────────
 import { Router, Response } from "express";
 import * as admin from "firebase-admin";
@@ -22,7 +22,8 @@ import { GameResult, UserDoc } from "./types";
 import { requireAuth, AuthRequest } from "./middleware";
 
 const router = Router();
-const db = () => admin.firestore();
+const db  = () => admin.firestore();
+const rdb = () => admin.database();
 
 type SubmitOutcome = {
   code: number;
@@ -40,42 +41,48 @@ router.post("/submit", requireAuth, async (req: AuthRequest, res: Response): Pro
       return;
     }
 
-    const roomRef = db().collection("rooms").doc(roomId);
+    // ── FIX: xona Realtime Database'da turadi ──
+    const roomSnap = await rdb().ref(`rooms/${roomId}`).get();
+    if (!roomSnap.exists()) {
+      res.status(404).json({ error: "not-found", message: "Room not found" });
+      return;
+    }
+    const room = roomSnap.val();
+
+    if (room.player1Uid !== callerUid && room.player2Uid !== callerUid) {
+      res.status(403).json({ error: "permission-denied", message: "Not your game" });
+      return;
+    }
+
+    const stake: number = room.stakeCoin ?? 0;
+    if (stake > 0 && !VALID_STAKES.includes(stake)) {
+      res.status(400).json({ error: "invalid-argument", message: "Invalid stake amount" });
+      return;
+    }
+
+    const opponentUid =
+      room.player1Uid === callerUid ? room.player2Uid : room.player1Uid;
+
+    // Hisob-kitob holati Firestore'da saqlanadi (transaction uchun)
+    const settleRef = db().collection("gameSettlements").doc(roomId);
 
     const outcome: SubmitOutcome = await db().runTransaction(async (tx) => {
       // ── 1. Barcha o'qishlar (Firestore tx qoidasi: avval read, keyin write) ──
-      const roomSnap = await tx.get(roomRef);
-      if (!roomSnap.exists) {
-        return { code: 404, body: { error: "not-found", message: "Room not found" } };
-      }
+      const myResultRef  = settleRef.collection("results").doc(callerUid);
+      const oppResultRef = settleRef.collection("results").doc(opponentUid);
 
-      const room = roomSnap.data()!;
-
-      if (room.player1Uid !== callerUid && room.player2Uid !== callerUid) {
-        return { code: 403, body: { error: "permission-denied", message: "Not your game" } };
-      }
-
-      if (room.status === "FINISHED" || room.status === "DISPUTED") {
-        return { code: 200, body: { ok: true, message: "Already finished" } };
-      }
-
-      const stake: number = room.stakeCoin ?? 0;
-      if (stake > 0 && !VALID_STAKES.includes(stake)) {
-        return { code: 400, body: { error: "invalid-argument", message: "Invalid stake amount" } };
-      }
-
-      const opponentUid =
-        room.player1Uid === callerUid ? room.player2Uid : room.player1Uid;
-
-      const myResultRef  = roomRef.collection("results").doc(callerUid);
-      const oppResultRef = roomRef.collection("results").doc(opponentUid);
-
-      const [mySnap, oppSnap, callerUserSnap, oppUserSnap] = await Promise.all([
+      const [settleSnap, mySnap, oppSnap, callerUserSnap, oppUserSnap] = await Promise.all([
+        tx.get(settleRef),
         tx.get(myResultRef),
         tx.get(oppResultRef),
         tx.get(db().collection("users").doc(callerUid)),
         tx.get(db().collection("users").doc(opponentUid)),
       ]);
+
+      const settleStatus = settleSnap.exists ? settleSnap.data()!.status : null;
+      if (settleStatus === "FINISHED" || settleStatus === "DISPUTED") {
+        return { code: 200, body: { ok: true, message: "Already finished" } };
+      }
 
       if (mySnap.exists) {
         return { code: 200, body: { ok: true, message: "Already submitted" } };
@@ -85,6 +92,7 @@ router.post("/submit", requireAuth, async (req: AuthRequest, res: Response): Pro
       tx.set(myResultRef, { result, submittedAt: Date.now() });
 
       if (!oppSnap.exists) {
+        tx.set(settleRef, { status: "WAITING", roomId, updatedAt: Date.now() }, { merge: true });
         return { code: 200, body: { ok: true, message: "Waiting for opponent result" } };
       }
 
@@ -100,14 +108,15 @@ router.post("/submit", requireAuth, async (req: AuthRequest, res: Response): Pro
         console.warn("Result conflict — room DISPUTED", {
           roomId, callerUid, result, opponentUid, opponentResult,
         });
-        tx.update(roomRef, {
+        tx.set(settleRef, {
           status: "DISPUTED",
+          roomId,
           disputedAt: Date.now(),
           disputeInfo: {
             [callerUid]: result,
             [opponentUid]: opponentResult,
           },
-        });
+        }, { merge: true });
         return { code: 200, body: { ok: true, disputed: true, message: "Result conflict — no rewards" } };
       }
 
@@ -118,11 +127,12 @@ router.post("/submit", requireAuth, async (req: AuthRequest, res: Response): Pro
       applyResult(tx, callerUserSnap, result,         stake, callerRating,   opponentRating);
       applyResult(tx, oppUserSnap,   opponentResult, stake, opponentRating, callerRating);
 
-      tx.update(roomRef, {
+      tx.set(settleRef, {
         status: "FINISHED",
+        roomId,
         winnerId: result === "win" ? callerUid : result === "loss" ? opponentUid : null,
         finishedAt: Date.now(),
-      });
+      }, { merge: true });
 
       // Klub statistikasi (g'olibning klubi bo'lsa)
       if (result !== "draw") {
@@ -139,6 +149,13 @@ router.post("/submit", requireAuth, async (req: AuthRequest, res: Response): Pro
 
       return { code: 200, body: { ok: true } };
     });
+
+    // RTDB'dagi xonani ham yangilab qo'yamiz (tx'dan tashqarida, muhim emas)
+    if (outcome.code === 200 && (outcome.body.ok as boolean)) {
+      try {
+        await rdb().ref(`rooms/${roomId}`).update({ status: "FINISHED" });
+      } catch { /* e'tiborsiz */ }
+    }
 
     res.status(outcome.code).json(outcome.body);
   } catch (err) {
@@ -165,9 +182,7 @@ function applyResult(
 
   switch (result) {
     case "win":
-      // COIN FIX: tikuv matchmaking'da yechilmaydi, shuning uchun g'olib
-      // raqibdan +stake oladi (stake*2 EMAS — eski formula tizimga
-      // havodan tanga qo'shardi).
+      // Tikuv matchmaking'da yechilmaydi: g'olib raqibdan +stake oladi.
       coinsDelta = stake > 0 ? stake + WIN_BASE_BONUS : WIN_BASE_BONUS;
       xpGain     = XP_WIN;
       eloDelta   = calcElo(myRating, opponentRating, 1);
