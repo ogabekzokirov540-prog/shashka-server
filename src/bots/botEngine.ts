@@ -153,8 +153,17 @@ function minimax(
   }
 }
 
+// ── Bot darajasiga qarab Minimax chuqurligi ───
+export function depthForLevel(level: number): number {
+  if (level <= 4)  return 1;
+  if (level <= 8)  return 2;
+  if (level <= 12) return 3;
+  if (level <= 16) return 4;
+  return 5;
+}
+
 // ── Bot harakatini tanlash ────────────────────
-export function selectBotMove(moves: Move[], style: BotStyle, board: Board, botColor: string): Move {
+export function selectBotMove(moves: Move[], style: BotStyle, board: Board, botColor: string, depthOverride?: number): Move {
   if (moves.length === 0) throw new Error("No valid moves");
   if (moves.length === 1) return moves[0];
 
@@ -171,6 +180,9 @@ export function selectBotMove(moves: Move[], style: BotStyle, board: Board, botC
     case "defensive": depth = 4; break;
     default: depth = 3;
   }
+
+  // Daraja bo'yicha aniq chuqurlik berilgan bo'lsa — o'sha ustun
+  if (depthOverride !== undefined) depth = depthOverride;
 
   // Beginner — ba'zan xato qiladi
   if (style === "beginner" && Math.random() < 0.3) {
@@ -237,7 +249,7 @@ export async function seedBotToFirestore(bot: BotProfile): Promise<void> {
 }
 
 // ── Yangi format (row_col) bot harakat ───────
-export async function makeBotMoveNewFormat(roomId: string, botColor: string, style: BotStyle): Promise<void> {
+export async function makeBotMoveNewFormat(roomId: string, botColor: string, style: BotStyle, level: number = 10): Promise<void> {
   const gameStateSnap = await rdb().ref(`rooms/${roomId}/gameState`).get();
   if (!gameStateSnap.exists()) return;
 
@@ -268,19 +280,33 @@ export async function makeBotMoveNewFormat(roomId: string, botColor: string, sty
     return;
   }
 
-  const move = selectBotMove(moves, style, board, botColor);
+  // LEARNING: avval o'z darajasidagi haqiqiy g'oliblar kitobidan qaraymiz,
+  // topilmasa — darajaga mos chuqurlikdagi Minimax
+  // (require — circular import'ning oldini olish uchun)
+  const { getBookMove } = require("./botLearning") as typeof import("./botLearning");
+  let move: Move | null = null;
+  try { move = getBookMove(level, board, botColor, moves); } catch { move = null; }
+  if (move) {
+    console.log(`[bot] level ${level}: playing learned move (from real winners)`);
+  } else {
+    move = selectBotMove(moves, style, board, botColor, depthForLevel(level));
+  }
   const newBoard = applyMove(board, move);
 
   // Ketma-ket urish tekshiruvi
   const continueMoves = move.captured.length > 0
     ? getValidMovesForColor(newBoard, botColor).filter(
-        m => m.from.row === move.to.row && m.from.col === move.to.col && m.captured.length > 0
+        m => m.from.row === move!.to.row && m.from.col === move!.to.col && m.captured.length > 0
       )
     : [];
 
   if (continueMoves.length > 0) {
-    // Ketma-ket urishni davom ettirish
-    const nextMove = selectBotMove(continueMoves, style, newBoard, botColor);
+    // Ketma-ket urishni davom ettirish (bu yerda ham kitobdan qaraymiz)
+    let nextMove: Move | null = null;
+    try { nextMove = getBookMove(level, newBoard, botColor, continueMoves); } catch { nextMove = null; }
+    if (!nextMove) {
+      nextMove = selectBotMove(continueMoves, style, newBoard, botColor, depthForLevel(level));
+    }
     const finalBoard = applyMove(newBoard, nextMove);
     await saveBoard(finalBoard, botColor, roomId);
     return;

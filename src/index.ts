@@ -129,6 +129,8 @@ app.listen(PORT, () => {
   try {
     const { startBotGameListener } = require("./bots/botMatchmaking");
     startBotGameListener();
+    const { startBotLearning } = require("./bots/botLearning");
+    startBotLearning();
   } catch (e) {
     console.error("Bot listener error (non-critical):", e);
   }
