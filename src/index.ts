@@ -131,6 +131,8 @@ app.listen(PORT, () => {
     startBotGameListener();
     const { startBotLearning } = require("./bots/botLearning");
     startBotLearning();
+    const { startGameSweeper } = require("./gameSweeper");
+    startGameSweeper();
   } catch (e) {
     console.error("Bot listener error (non-critical):", e);
   }

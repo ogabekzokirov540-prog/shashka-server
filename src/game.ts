@@ -211,7 +211,7 @@ router.post("/submit", requireAuth, async (req: AuthRequest, res: Response): Pro
   }
 });
 
-function applyResult(
+export function applyResult(
   tx: FirebaseFirestore.Transaction,
   userSnap: FirebaseFirestore.DocumentSnapshot,
   result: GameResult,
