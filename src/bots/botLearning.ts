@@ -23,9 +23,9 @@ type Board = Piece[][];
 const books = new Map<number, Map<string, Map<string, number>>>();
 let lastBuildAt = 0;
 
-const REBUILD_EVERY_MS = 6 * 60 * 60 * 1000; // har 6 soatda qayta o'rganish
+const REBUILD_EVERY_MS = 60 * 60 * 1000;     // har 1 soatda qayta o'rganish (o'yinchi kam paytda tezroq)
 const MAX_PLAYERS_PER_BUILD = 200;           // bitta buildda nechta o'yinchi
-const GAMES_PER_PLAYER = 15;                 // har o'yinchidan nechta yutgan o'yin
+const GAMES_PER_PLAYER = 30;                 // har o'yinchidan nechta o'yin (yutgan+yutqazgan)
 const BOOK_MOVE_PROBABILITY = 0.85;          // kitobdan yurish ehtimoli (xilma-xillik uchun 100% emas)
 
 // ── Level → guruh (bracket) ───────────────────
@@ -82,7 +82,7 @@ function applyMove(board: Board, move: Move): Board {
 function analyzeReplay(
   target: Map<number, Map<string, Map<string, number>>>,
   bracket: number,
-  myColor: string,
+  winnerColor: string,
   moves: Array<Record<string, unknown>>
 ): void {
   let board = initialBoard();
@@ -101,7 +101,7 @@ function analyzeReplay(
     if (!mv) break; // qoidaga mos kelmadi — replayni tashlaymiz
 
     // Faqat G'OLIBNING yurishlarini eslab qolamiz
-    if (turn === myColor) {
+    if (turn === winnerColor) {
       let book = target.get(bracket);
       if (!book) { book = new Map(); target.set(bracket, book); }
       const pk = posKey(board, turn);
@@ -144,18 +144,28 @@ export async function rebuildBooks(): Promise<void> {
       const bracket = levelBracket(level);
 
       const snap = await parent.collection("games")
-        .where("result", "==", "win")
         .limit(GAMES_PER_PLAYER)
         .get();
 
       for (const doc of snap.docs) {
         const myColor = doc.get("myColor") as string;
+        const result = doc.get("result") as string;
         const rawMoves = (doc.get("moves") as Array<Record<string, unknown>>) ?? [];
         if (!myColor || rawMoves.length < 4) continue; // juda qisqa o'yinlar foydasiz
+        if (result !== "win" && result !== "loss") continue; // durang — o'rganilmaydi
+
+        // Har replayda IKKALA tomon yurishlari bor. G'OLIB tomonni o'rganamiz:
+        // - result=="win"  → replay egasi g'olib (odam)
+        // - result=="loss" → RAQIB g'olib (ko'pincha bot!) — uning yurishlari
+        //   ham kitobga kiradi. Shu tufayli bot-odam o'yinlari ham tahlil
+        //   qilinadi va ma'lumot ikki baravar tez to'planadi.
+        const winnerColor =
+          result === "win" ? myColor : (myColor === "WHITE" ? "BLACK" : "WHITE");
+
         const sorted = rawMoves.slice().sort(
           (a, b) => Number(a.moveNumber ?? 0) - Number(b.moveNumber ?? 0)
         );
-        analyzeReplay(newBooks, bracket, myColor, sorted);
+        analyzeReplay(newBooks, bracket, winnerColor, sorted);
         gamesAnalyzed++;
       }
     }
@@ -216,5 +226,5 @@ export function getBookMove(
 export function startBotLearning(): void {
   rebuildBooks(); // start'da darhol
   setInterval(rebuildBooks, REBUILD_EVERY_MS); // keyin har 6 soatda
-  console.log("[botLearning] Started — learning from winning replays every 6h");
+  console.log("[botLearning] Started — learning winner moves (incl. bot wins) every 1h");
 }
