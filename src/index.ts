@@ -6,6 +6,7 @@ import cron from "node-cron";
 
 import gameRouter        from "./game";
 import dailyRouter       from "./daily";
+import missionsRouter    from "./missions";
 import matchmakingRouter from "./matchmaking";
 import userRouter        from "./user";
 import clubRouter        from "./club";
@@ -33,6 +34,7 @@ app.use(express.json());
 
 app.use("/game",        gameRouter);
 app.use("/daily",       dailyRouter);
+app.use("/missions",    missionsRouter);
 app.use("/matchmaking", matchmakingRouter);
 app.use("/user",        userRouter);
 app.use("/club",        clubRouter);

@@ -20,6 +20,7 @@ import {
 } from "./config";
 import { GameResult, UserDoc } from "./types";
 import { requireAuth, AuthRequest } from "./middleware";
+import { bumpMissionProgress } from "./missions";
 
 const router = Router();
 const db  = () => admin.firestore();
@@ -280,6 +281,11 @@ export function applyResult(
   }
 
   tx.update(userSnap.ref, update);
+
+  bumpMissionProgress(tx, userSnap.ref, user, {
+    won: result === "win",
+    captured: 0,
+  });
 }
 
 export default router;
