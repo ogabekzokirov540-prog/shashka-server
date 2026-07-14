@@ -32,13 +32,13 @@ const DIFFICULTY_CONFIG: Record<BotDifficulty, {
   quiescenceDepth: number;
   useOpeningBook: boolean;
 }> = {
-  beginner:    { depth: 2, mistakeRate: 0.35, randomness: 0.4,  quiescenceDepth: 1, useOpeningBook: false },
-  easy:        { depth: 4, mistakeRate: 0.20, randomness: 0.25, quiescenceDepth: 2, useOpeningBook: false },
-  medium:      { depth: 6, mistakeRate: 0.10, randomness: 0.15, quiescenceDepth: 3, useOpeningBook: true  },
-  hard:        { depth: 8, mistakeRate: 0.04, randomness: 0.08, quiescenceDepth: 4, useOpeningBook: true  },
-  expert:      { depth:10, mistakeRate: 0.01, randomness: 0.04, quiescenceDepth: 5, useOpeningBook: true  },
-  master:      { depth:12, mistakeRate: 0.00, randomness: 0.02, quiescenceDepth: 6, useOpeningBook: true  },
-  grandmaster: { depth:14, mistakeRate: 0.00, randomness: 0.01, quiescenceDepth: 8, useOpeningBook: true  },
+  beginner:    { depth: 1, mistakeRate: 0.50, randomness: 0.6,  quiescenceDepth: 0, useOpeningBook: false },
+  easy:        { depth: 2, mistakeRate: 0.30, randomness: 0.35, quiescenceDepth: 1, useOpeningBook: false },
+  medium:      { depth: 4, mistakeRate: 0.10, randomness: 0.15, quiescenceDepth: 2, useOpeningBook: true  },
+  hard:        { depth: 6, mistakeRate: 0.03, randomness: 0.05, quiescenceDepth: 3, useOpeningBook: true  },
+  expert:      { depth: 8, mistakeRate: 0.01, randomness: 0.02, quiescenceDepth: 4, useOpeningBook: true  },
+  master:      { depth:10, mistakeRate: 0.00, randomness: 0.01, quiescenceDepth: 5, useOpeningBook: true  },
+  grandmaster: { depth:12, mistakeRate: 0.00, randomness: 0.00, quiescenceDepth: 6, useOpeningBook: true  },
 };
 
 // ── Zobrist Hashing ───────────────────────────────────
@@ -213,59 +213,87 @@ const CENTER_BONUS = [
 function evaluate(board: Board, botColor: string, style: BotStyle): number {
   const oppColor = botColor === "WHITE" ? "BLACK" : "WHITE";
   let score = 0;
-
-  let botPieces = 0, oppPieces = 0;
-  let botKings = 0, oppKings = 0;
-  let botMobility = 0, oppMobility = 0;
+  let botPieces = 0, oppPieces = 0, botKings = 0, oppKings = 0;
 
   for (let r = 0; r < 8; r++) {
     for (let c = 0; c < 8; c++) {
       const p = board[r][c];
       if (!p) continue;
       const isBot = p.color === botColor;
-      const centerVal = CENTER_BONUS[r][c] * 0.1;
-      const advanceVal = p.isKing ? 0 :
-        (p.color === "WHITE" ? (7 - r) * 0.05 : r * 0.05);
-      const backRankBonus = (p.color === "WHITE" && r === 7) ||
-        (p.color === "BLACK" && r === 0) ? 0.3 : 0;
-
+      
       if (p.isKing) {
-        if (isBot) { score += 5 + centerVal; botKings++; }
-        else { score -= 5 + centerVal; oppKings++; }
+        // Dama juda qimmat
+        const kingVal = 7.0 + CENTER_BONUS[r][c] * 0.3;
+        if (isBot) { score += kingVal; botKings++; }
+        else { score -= kingVal; oppKings++; }
       } else {
-        if (isBot) {
-          score += 1 + centerVal + advanceVal + backRankBonus;
-          botPieces++;
-        } else {
-          score -= 1 + centerVal + advanceVal + backRankBonus;
-          oppPieces++;
-        }
+        // Oddiy dona
+        const advanceRow = p.color === "WHITE" ? (7 - r) : r;
+        const advanceVal = advanceRow * 0.08;
+        const centerVal = CENTER_BONUS[r][c] * 0.12;
+        // Orqa qator bonusi (dama bo'lishni oldini olish uchun)
+        const backRow = (p.color === "WHITE" && r === 7) || (p.color === "BLACK" && r === 0);
+        const backVal = backRow ? 0.5 : 0;
+        // Yon qirg'oq jarima (yon tomondagi donalar zaif)
+        const edgePenalty = (c === 0 || c === 7) ? -0.1 : 0;
+        
+        const totalVal = 1.0 + advanceVal + centerVal + backVal + edgePenalty;
+        if (isBot) { score += totalVal; botPieces++; }
+        else { score -= totalVal; oppPieces++; }
       }
     }
   }
 
-  // Mobility
+  // Mobility bonus
   const botMoves = getValidMovesForColor(board, botColor);
   const oppMoves = getValidMovesForColor(board, oppColor);
-  botMobility = botMoves.length;
-  oppMobility = oppMoves.length;
-  score += (botMobility - oppMobility) * 0.05;
+  score += (botMoves.length - oppMoves.length) * 0.08;
+
+  // Capture threat bonus
+  const botCaptures = botMoves.filter(m => m.isCapture).length;
+  const oppCaptures = oppMoves.filter(m => m.isCapture).length;
+  score += (botCaptures - oppCaptures) * 0.15;
+
+  // Trade advantage — agar ko'proq dona bo'lsa, almashtirish foydali
+  const botTotal = botPieces + botKings * 3;
+  const oppTotal = oppPieces + oppKings * 3;
+  if (botTotal > oppTotal) score += 0.3;
 
   // Style adjustments
   if (style === "aggressive") {
-    score += botKings * 0.5;
-    score += botMoves.filter(m => m.isCapture).length * 0.2;
+    score += botCaptures * 0.3;
+    score += botKings * 1.0;
   } else if (style === "defensive") {
-    score += backRankBonus(board, botColor) * 0.4;
-  } else if (style === "balanced") {
-    score += (botMobility - oppMobility) * 0.15;
+    const backRank = backRankBonus(board, botColor);
+    score += backRank * 0.5;
+    // Donalarni himoya qilish
+    score -= oppCaptures * 0.4;
   }
 
   // Endgame
   const total = botPieces + oppPieces + botKings + oppKings;
-  if (total <= 6) {
-    score += (botKings - oppKings) * 2;
-    if (botKings > 0 && oppKings === 0 && oppPieces <= 2) score += 3;
+  if (total <= 8) {
+    score += (botKings - oppKings) * 3.0;
+    // King vs pieces endgame
+    if (botKings >= 2 && oppKings === 0) score += 5.0;
+    if (oppKings >= 2 && botKings === 0) score -= 5.0;
+    // Yaqinlashtirish bonusi — endgame da donalarni yaqinlash
+    if (botKings > 0 && oppPieces > 0) {
+      for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+          const p = board[r][c];
+          if (!p || p.color !== botColor || !p.isKing) continue;
+          for (let r2 = 0; r2 < 8; r2++) {
+            for (let c2 = 0; c2 < 8; c2++) {
+              const p2 = board[r2][c2];
+              if (!p2 || p2.color === botColor) continue;
+              const dist = Math.abs(r - r2) + Math.abs(c - c2);
+              score += (14 - dist) * 0.05;
+            }
+          }
+        }
+      }
+    }
   }
 
   return score;
