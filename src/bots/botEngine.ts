@@ -1,24 +1,105 @@
-// ─────────────────────────────────────────────
-//  BotEngine — Minimax + Alpha-Beta pruning
-// ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════
+//  Professional Russian Checkers AI Engine
+//  Features: Minimax + Alpha-Beta + Iterative Deepening
+//  Transposition Table + Zobrist Hashing + Move Ordering
+//  Quiescence Search + Opening Book + Endgame Knowledge
+// ═══════════════════════════════════════════════════════
 import * as admin from "firebase-admin";
 import { BotProfile, BotStyle } from "./botProfiles";
 
 const db  = () => admin.firestore();
 const rdb = () => admin.database();
 
+// ── Types ─────────────────────────────────────────────
+export type Piece = { color: string; isKing: boolean } | null;
+export type Board = Piece[][];
+export type BotDifficulty = "beginner"|"easy"|"medium"|"hard"|"expert"|"master"|"grandmaster";
+
 export interface Position { row: number; col: number; }
-export interface Move { from: Position; to: Position; captured: Position[]; }
+export interface Move {
+  from: Position;
+  to: Position;
+  captured: Position[];
+  isCapture: boolean;
+  promotesToKing?: boolean;
+}
 
-type Piece = { color: string; isKing: boolean } | null;
-type Board = Piece[][];
+// ── Difficulty config ─────────────────────────────────
+const DIFFICULTY_CONFIG: Record<BotDifficulty, {
+  depth: number;
+  mistakeRate: number;
+  randomness: number;
+  quiescenceDepth: number;
+  useOpeningBook: boolean;
+}> = {
+  beginner:    { depth: 2, mistakeRate: 0.35, randomness: 0.4,  quiescenceDepth: 1, useOpeningBook: false },
+  easy:        { depth: 4, mistakeRate: 0.20, randomness: 0.25, quiescenceDepth: 2, useOpeningBook: false },
+  medium:      { depth: 6, mistakeRate: 0.10, randomness: 0.15, quiescenceDepth: 3, useOpeningBook: true  },
+  hard:        { depth: 8, mistakeRate: 0.04, randomness: 0.08, quiescenceDepth: 4, useOpeningBook: true  },
+  expert:      { depth:10, mistakeRate: 0.01, randomness: 0.04, quiescenceDepth: 5, useOpeningBook: true  },
+  master:      { depth:12, mistakeRate: 0.00, randomness: 0.02, quiescenceDepth: 6, useOpeningBook: true  },
+  grandmaster: { depth:14, mistakeRate: 0.00, randomness: 0.01, quiescenceDepth: 8, useOpeningBook: true  },
+};
 
-// ── Board utility ─────────────────────────────
-function cloneBoard(board: Board): Board {
+// ── Zobrist Hashing ───────────────────────────────────
+const ZOBRIST: number[][][] = Array.from({length: 8}, () =>
+  Array.from({length: 8}, () =>
+    Array.from({length: 4}, () => Math.floor(Math.random() * 2**31))
+  )
+);
+const ZOBRIST_TURN = Math.floor(Math.random() * 2**31);
+
+function pieceIndex(piece: Piece): number {
+  if (!piece) return -1;
+  if (piece.color === "WHITE") return piece.isKing ? 1 : 0;
+  return piece.isKing ? 3 : 2;
+}
+
+function computeHash(board: Board, isWhiteTurn: boolean): number {
+  let hash = isWhiteTurn ? ZOBRIST_TURN : 0;
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const idx = pieceIndex(board[r][c]);
+      if (idx >= 0) hash ^= ZOBRIST[r][c][idx];
+    }
+  }
+  return hash;
+}
+
+// ── Transposition Table ───────────────────────────────
+interface TTEntry { score: number; depth: number; flag: "exact"|"lower"|"upper"; bestMove?: Move; }
+const transpositionTable = new Map<number, TTEntry>();
+const MAX_TT_SIZE = 100000;
+
+function ttGet(hash: number): TTEntry | undefined {
+  return transpositionTable.get(hash);
+}
+function ttSet(hash: number, entry: TTEntry): void {
+  if (transpositionTable.size >= MAX_TT_SIZE) {
+    const firstKey = transpositionTable.keys().next().value!;
+    transpositionTable.delete(firstKey);
+  }
+  transpositionTable.set(hash, entry);
+}
+
+// ── Opening Book ──────────────────────────────────────
+const OPENING_MOVES: Move[][] = [
+  [{ from:{row:5,col:0}, to:{row:4,col:1}, captured:[], isCapture:false }],
+  [{ from:{row:5,col:2}, to:{row:4,col:1}, captured:[], isCapture:false }],
+  [{ from:{row:5,col:2}, to:{row:4,col:3}, captured:[], isCapture:false }],
+  [{ from:{row:5,col:4}, to:{row:4,col:3}, captured:[], isCapture:false }],
+  [{ from:{row:5,col:4}, to:{row:4,col:5}, captured:[], isCapture:false }],
+  [{ from:{row:5,col:6}, to:{row:4,col:5}, captured:[], isCapture:false }],
+  [{ from:{row:6,col:1}, to:{row:5,col:0}, captured:[], isCapture:false }],
+  [{ from:{row:6,col:1}, to:{row:5,col:2}, captured:[], isCapture:false }],
+];
+
+// ── Board utilities ───────────────────────────────────
+export function cloneBoard(board: Board): Board {
   return board.map(row => row.map(p => p ? { ...p } : null));
 }
 
-function applyMove(board: Board, move: Move): Board {
+function applyMoveToBoard(board: Board, move: Move): Board {
   const b = cloneBoard(board);
   const piece = b[move.from.row][move.from.col]!;
   b[move.from.row][move.from.col] = null;
@@ -30,252 +111,379 @@ function applyMove(board: Board, move: Move): Board {
   return b;
 }
 
-// ── Valid moves (Rus shashkasi qoidalari) ─────
-export function getValidMovesForColor(board: Board, color: string): Move[] {
-  const captures: Move[] = [];
-  const simple: Move[]   = [];
+// ── Move generation ───────────────────────────────────
+function getCaptures(board: Board, from: Position, color: string, isKing: boolean, alreadyCaptured: Set<string>): Move[] {
+  const result: Move[] = [];
+  const dirs = [[-1,-1],[-1,1],[1,-1],[1,1]];
 
-  for (let row = 0; row < 8; row++) {
-    for (let col = 0; col < 8; col++) {
-      const piece = board[row][col];
-      if (!piece || piece.color !== color) continue;
-
-      if (piece.isKing) {
-        // Dama harakatlari
-        for (const [dr, dc] of [[-1,-1],[-1,1],[1,-1],[1,1]]) {
-          let r = row + dr, c = col + dc;
-          let foundEnemy: Position | null = null;
-          while (r >= 0 && r < 8 && c >= 0 && c < 8) {
-            const cur = board[r][c];
-            if (cur) {
-              if (foundEnemy || cur.color === color) break;
-              foundEnemy = { row: r, col: c };
-            } else if (foundEnemy) {
-              captures.push({ from: {row,col}, to: {row:r,col:c}, captured: [foundEnemy] });
-            } else {
-              simple.push({ from: {row,col}, to: {row:r,col:c}, captured: [] });
-            }
-            r += dr; c += dc;
-          }
+  if (isKing) {
+    for (const [dr, dc] of dirs) {
+      let r = from.row + dr, c = from.col + dc;
+      let foundEnemy: Position | null = null;
+      while (r >= 0 && r < 8 && c >= 0 && c < 8) {
+        const cur = board[r][c];
+        const key = `${r},${c}`;
+        if (cur) {
+          if (foundEnemy || cur.color === color || alreadyCaptured.has(key)) break;
+          foundEnemy = { row: r, col: c };
+        } else if (foundEnemy) {
+          result.push({
+            from, to: {row:r,col:c},
+            captured: [foundEnemy], isCapture: true
+          });
         }
-      } else {
-        // Oddiy dona — barcha 4 tomonga urishi mumkin
-        const fwd = color === "WHITE" ? -1 : 1;
-        for (const [dr, dc] of [[-1,-1],[-1,1],[1,-1],[1,1]]) {
-          const mr = row+dr, mc = col+dc;
-          const lr = row+dr*2, lc = col+dc*2;
-          if (lr < 0 || lr >= 8 || lc < 0 || lc >= 8) continue;
-          const mid = board[mr]?.[mc];
-          if (mid && mid.color !== color && !board[lr][lc]) {
-            captures.push({ from:{row,col}, to:{row:lr,col:lc}, captured:[{row:mr,col:mc}] });
-          }
-        }
-        for (const [dr, dc] of [[fwd,-1],[fwd,1]]) {
-          const nr = row+dr, nc = col+dc;
-          if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8 && !board[nr][nc]) {
-            simple.push({ from:{row,col}, to:{row:nr,col:nc}, captured:[] });
-          }
-        }
+        r += dr; c += dc;
+      }
+    }
+  } else {
+    for (const [dr, dc] of dirs) {
+      const mr = from.row+dr, mc = from.col+dc;
+      const lr = from.row+dr*2, lc = from.col+dc*2;
+      if (lr < 0 || lr >= 8 || lc < 0 || lc >= 8) continue;
+      const mid = board[mr]?.[mc];
+      const key = `${mr},${mc}`;
+      if (mid && mid.color !== color && !alreadyCaptured.has(key) && !board[lr][lc]) {
+        result.push({ from, to:{row:lr,col:lc}, captured:[{row:mr,col:mc}], isCapture:true });
       }
     }
   }
-  return captures.length > 0 ? captures : simple;
+  return result;
 }
 
-// ── Board baholash funksiyasi ─────────────────
-function evaluate(board: Board, botColor: string): number {
+function getSimpleMoves(board: Board, from: Position, color: string, isKing: boolean): Move[] {
+  const result: Move[] = [];
+  const fwd = color === "WHITE" ? -1 : 1;
+
+  if (isKing) {
+    for (const [dr, dc] of [[-1,-1],[-1,1],[1,-1],[1,1]]) {
+      let r = from.row+dr, c = from.col+dc;
+      while (r >= 0 && r < 8 && c >= 0 && c < 8 && !board[r][c]) {
+        result.push({ from, to:{row:r,col:c}, captured:[], isCapture:false });
+        r += dr; c += dc;
+      }
+    }
+  } else {
+    for (const dc of [-1, 1]) {
+      const nr = from.row+fwd, nc = from.col+dc;
+      if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8 && !board[nr][nc]) {
+        const promotesToKing = (color === "WHITE" && nr === 0) || (color === "BLACK" && nr === 7);
+        result.push({ from, to:{row:nr,col:nc}, captured:[], isCapture:false, promotesToKing });
+      }
+    }
+  }
+  return result;
+}
+
+export function getValidMovesForColor(board: Board, color: string): Move[] {
+  const captures: Move[] = [];
+  const simples: Move[] = [];
+
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const piece = board[r][c];
+      if (!piece || piece.color !== color) continue;
+      const from = { row: r, col: c };
+      const caps = getCaptures(board, from, color, piece.isKing, new Set());
+      captures.push(...caps);
+      if (caps.length === 0) {
+        simples.push(...getSimpleMoves(board, from, color, piece.isKing));
+      }
+    }
+  }
+  return captures.length > 0 ? captures : simples;
+}
+
+// Chain captures
+function getChainCaptures(board: Board, from: Position, color: string, isKing: boolean, alreadyCaptured: Set<string>): Move[] {
+  return getCaptures(board, from, color, isKing, alreadyCaptured);
+}
+
+// ── Evaluation function ───────────────────────────────
+const CENTER_BONUS = [
+  [0,0,0,0,0,0,0,0],
+  [0,1,1,1,1,1,1,0],
+  [0,1,2,2,2,2,1,0],
+  [0,1,2,3,3,2,1,0],
+  [0,1,2,3,3,2,1,0],
+  [0,1,2,2,2,2,1,0],
+  [0,1,1,1,1,1,1,0],
+  [0,0,0,0,0,0,0,0],
+];
+
+function evaluate(board: Board, botColor: string, style: BotStyle): number {
   const oppColor = botColor === "WHITE" ? "BLACK" : "WHITE";
   let score = 0;
+
+  let botPieces = 0, oppPieces = 0;
+  let botKings = 0, oppKings = 0;
+  let botMobility = 0, oppMobility = 0;
 
   for (let r = 0; r < 8; r++) {
     for (let c = 0; c < 8; c++) {
       const p = board[r][c];
       if (!p) continue;
       const isBot = p.color === botColor;
-      const val = p.isKing ? 5 : 1;
-      // Pozitsion bonus
-      const centerBonus = (r >= 2 && r <= 5 && c >= 2 && c <= 5) ? 0.1 : 0;
-      // Ilgarilab ketish bonusi
-      const advanceBonus = p.isKing ? 0 :
+      const centerVal = CENTER_BONUS[r][c] * 0.1;
+      const advanceVal = p.isKing ? 0 :
         (p.color === "WHITE" ? (7 - r) * 0.05 : r * 0.05);
-      if (isBot) {
-        score += val + centerBonus + advanceBonus;
+      const backRankBonus = (p.color === "WHITE" && r === 7) ||
+        (p.color === "BLACK" && r === 0) ? 0.3 : 0;
+
+      if (p.isKing) {
+        if (isBot) { score += 5 + centerVal; botKings++; }
+        else { score -= 5 + centerVal; oppKings++; }
       } else {
-        score -= val + centerBonus + advanceBonus;
+        if (isBot) {
+          score += 1 + centerVal + advanceVal + backRankBonus;
+          botPieces++;
+        } else {
+          score -= 1 + centerVal + advanceVal + backRankBonus;
+          oppPieces++;
+        }
       }
     }
   }
+
+  // Mobility
+  const botMoves = getValidMovesForColor(board, botColor);
+  const oppMoves = getValidMovesForColor(board, oppColor);
+  botMobility = botMoves.length;
+  oppMobility = oppMoves.length;
+  score += (botMobility - oppMobility) * 0.05;
+
+  // Style adjustments
+  if (style === "aggressive") {
+    score += botKings * 0.5;
+    score += botMoves.filter(m => m.isCapture).length * 0.2;
+  } else if (style === "defensive") {
+    score += backRankBonus(board, botColor) * 0.4;
+  } else if (style === "balanced") {
+    score += (botMobility - oppMobility) * 0.15;
+  }
+
+  // Endgame
+  const total = botPieces + oppPieces + botKings + oppKings;
+  if (total <= 6) {
+    score += (botKings - oppKings) * 2;
+    if (botKings > 0 && oppKings === 0 && oppPieces <= 2) score += 3;
+  }
+
   return score;
 }
 
-// ── Minimax + Alpha-Beta ──────────────────────
-function minimax(
-  board: Board,
-  depth: number,
-  alpha: number,
-  beta: number,
-  isMaximizing: boolean,
-  botColor: string
-): number {
+function backRankBonus(board: Board, color: string): number {
+  const row = color === "WHITE" ? 7 : 0;
+  let bonus = 0;
+  for (let c = 0; c < 8; c++) {
+    const p = board[row][c];
+    if (p && p.color === color && !p.isKing) bonus++;
+  }
+  return bonus;
+}
+
+// ── Move ordering ─────────────────────────────────────
+function orderMoves(moves: Move[], board: Board, botColor: string, bestMove?: Move): Move[] {
+  return moves.sort((a, b) => {
+    let scoreA = 0, scoreB = 0;
+    if (bestMove && a.from.row === bestMove.from.row && a.from.col === bestMove.from.col &&
+        a.to.row === bestMove.to.row && a.to.col === bestMove.to.col) scoreA += 1000;
+    if (bestMove && b.from.row === bestMove.from.row && b.from.col === bestMove.from.col &&
+        b.to.row === bestMove.to.row && b.to.col === bestMove.to.col) scoreB += 1000;
+    if (a.isCapture) scoreA += 100 + a.captured.length * 50;
+    if (b.isCapture) scoreB += 100 + b.captured.length * 50;
+    if (a.promotesToKing) scoreA += 80;
+    if (b.promotesToKing) scoreB += 80;
+    const centerA = CENTER_BONUS[a.to.row][a.to.col];
+    const centerB = CENTER_BONUS[b.to.row][b.to.col];
+    scoreA += centerA * 5;
+    scoreB += centerB * 5;
+    return scoreB - scoreA;
+  });
+}
+
+// ── Quiescence Search ─────────────────────────────────
+function quiescence(board: Board, alpha: number, beta: number, isMaximizing: boolean,
+    botColor: string, style: BotStyle, depth: number): number {
+  const standPat = evaluate(board, botColor, style) * (isMaximizing ? 1 : -1);
+  if (depth <= 0) return standPat;
+  if (standPat >= beta) return beta;
+  if (standPat > alpha) alpha = standPat;
+
+  const color = isMaximizing ? botColor : (botColor === "WHITE" ? "BLACK" : "WHITE");
+  const allMoves = getValidMovesForColor(board, color);
+  const captures = allMoves.filter(m => m.isCapture);
+
+  for (const move of captures) {
+    const newBoard = applyMoveToBoard(board, move);
+    const score = -quiescence(newBoard, -beta, -alpha, !isMaximizing, botColor, style, depth - 1);
+    if (score >= beta) return beta;
+    if (score > alpha) alpha = score;
+  }
+  return alpha;
+}
+
+// ── Minimax + Alpha-Beta + TT ─────────────────────────
+function minimax(board: Board, depth: number, alpha: number, beta: number,
+    isMaximizing: boolean, botColor: string, style: BotStyle,
+    hash: number, quiescenceDepth: number): { score: number; bestMove?: Move } {
+  const ttEntry = ttGet(hash);
+  if (ttEntry && ttEntry.depth >= depth) {
+    if (ttEntry.flag === "exact") return { score: ttEntry.score, bestMove: ttEntry.bestMove };
+    if (ttEntry.flag === "lower" && ttEntry.score > alpha) alpha = ttEntry.score;
+    if (ttEntry.flag === "upper" && ttEntry.score < beta) beta = ttEntry.score;
+    if (alpha >= beta) return { score: ttEntry.score, bestMove: ttEntry.bestMove };
+  }
+
   const color = isMaximizing ? botColor : (botColor === "WHITE" ? "BLACK" : "WHITE");
   const moves = getValidMovesForColor(board, color);
 
-  if (depth === 0 || moves.length === 0) {
-    return evaluate(board, botColor);
+  if (moves.length === 0) {
+    return { score: isMaximizing ? -100 : 100 };
   }
+
+  if (depth <= 0) {
+    const score = quiescence(board, alpha, beta, isMaximizing, botColor, style, quiescenceDepth);
+    return { score };
+  }
+
+  const ordered = orderMoves(moves, board, botColor, ttEntry?.bestMove);
+  let bestMove: Move | undefined;
+  let originalAlpha = alpha;
 
   if (isMaximizing) {
-    let maxEval = -Infinity;
-    for (const move of moves) {
-      const newBoard = applyMove(board, move);
-      // Ketma-ket urish
-      const continueMoves = move.captured.length > 0
-        ? getValidMovesForColor(newBoard, color).filter(m => m.from.row === move.to.row && m.from.col === move.to.col && m.captured.length > 0)
-        : [];
-      const nextIsMax = continueMoves.length > 0 ? true : false;
-      const nextColor = continueMoves.length > 0;
-      const evalScore = minimax(newBoard, depth - 1, alpha, beta, nextColor ? true : false, botColor);
-      maxEval = Math.max(maxEval, evalScore);
-      alpha = Math.max(alpha, evalScore);
+    let maxScore = -Infinity;
+    for (const move of ordered) {
+      const newBoard = applyMoveToBoard(board, move);
+      const newHash = computeHash(newBoard, !isMaximizing);
+      const { score } = minimax(newBoard, depth - 1, alpha, beta, false, botColor, style, newHash, quiescenceDepth);
+      if (score > maxScore) { maxScore = score; bestMove = move; }
+      alpha = Math.max(alpha, score);
       if (beta <= alpha) break;
     }
-    return maxEval;
+    const flag = maxScore <= originalAlpha ? "upper" : maxScore >= beta ? "lower" : "exact";
+    ttSet(hash, { score: maxScore, depth, flag, bestMove });
+    return { score: maxScore, bestMove };
   } else {
-    let minEval = Infinity;
-    for (const move of moves) {
-      const newBoard = applyMove(board, move);
-      const evalScore = minimax(newBoard, depth - 1, alpha, beta, true, botColor);
-      minEval = Math.min(minEval, evalScore);
-      beta = Math.min(beta, evalScore);
+    let minScore = Infinity;
+    for (const move of ordered) {
+      const newBoard = applyMoveToBoard(board, move);
+      const newHash = computeHash(newBoard, !isMaximizing);
+      const { score } = minimax(newBoard, depth - 1, alpha, beta, true, botColor, style, newHash, quiescenceDepth);
+      if (score < minScore) { minScore = score; bestMove = move; }
+      beta = Math.min(beta, score);
       if (beta <= alpha) break;
     }
-    return minEval;
+    const flag = minScore >= beta ? "lower" : minScore <= originalAlpha ? "upper" : "exact";
+    ttSet(hash, { score: minScore, depth, flag, bestMove });
+    return { score: minScore, bestMove };
   }
 }
 
-// ── Bot darajasiga qarab Minimax chuqurligi ───
-export function depthForLevel(level: number): number {
-  if (level <= 4)  return 1;
-  if (level <= 8)  return 2;
-  if (level <= 12) return 3;
-  if (level <= 16) return 4;
-  return 5;
+// ── Iterative Deepening ───────────────────────────────
+function iterativeDeepening(board: Board, maxDepth: number, botColor: string,
+    style: BotStyle, quiescenceDepth: number, timeLimit: number): Move | null {
+  const startTime = Date.now();
+  let bestMove: Move | null = null;
+  const hash = computeHash(board, botColor === "WHITE");
+
+  for (let depth = 1; depth <= maxDepth; depth++) {
+    if (Date.now() - startTime > timeLimit) break;
+    const result = minimax(board, depth, -Infinity, Infinity, true, botColor, style, hash, quiescenceDepth);
+    if (result.bestMove) bestMove = result.bestMove;
+  }
+  return bestMove;
 }
 
-// ── Bot harakatini tanlash ────────────────────
-export function selectBotMove(moves: Move[], style: BotStyle, board: Board, botColor: string, depthOverride?: number): Move {
+// ── Style move selection ──────────────────────────────
+export function selectBotMove(moves: Move[], style: BotStyle, board: Board,
+    botColor: string, difficulty: BotDifficulty = "medium"): Move {
   if (moves.length === 0) throw new Error("No valid moves");
   if (moves.length === 1) return moves[0];
 
-  // Majburiy yutish — eng ko'p dona yutuvchi
-  const captureMoves = moves.filter(m => m.captured.length > 0);
+  const config = DIFFICULTY_CONFIG[difficulty] || DIFFICULTY_CONFIG.medium;
 
-  // Minimax chuqurligi uslubga qarab
-  let depth = 3;
-  switch (style) {
-    case "beginner": depth = 1; break;
-    case "random":   return moves[Math.floor(Math.random() * moves.length)];
-    case "balanced": depth = 3; break;
-    case "aggressive":
-    case "defensive": depth = 4; break;
-    default: depth = 3;
-  }
-
-  // Daraja bo'yicha aniq chuqurlik berilgan bo'lsa — o'sha ustun
-  if (depthOverride !== undefined) depth = depthOverride;
-
-  // Beginner — ba'zan xato qiladi
-  if (style === "beginner" && Math.random() < 0.3) {
+  // Mistake simulation
+  if (config.mistakeRate > 0 && Math.random() < config.mistakeRate) {
     return moves[Math.floor(Math.random() * moves.length)];
   }
 
-  let bestMove = moves[0];
-  let bestScore = -Infinity;
-
-  const movesToEval = captureMoves.length > 0 ? captureMoves : moves;
-
-  for (const move of movesToEval) {
-    const newBoard = applyMove(board, move);
-    const score = minimax(newBoard, depth - 1, -Infinity, Infinity, false, botColor);
-    if (score > bestScore) {
-      bestScore = score;
-      bestMove = move;
+  // Use opening book for early game
+  if (config.useOpeningBook) {
+    const whiteCount = board.flat().filter(p => p?.color === "WHITE").length;
+    const blackCount = board.flat().filter(p => p?.color === "BLACK").length;
+    if (whiteCount === 12 && blackCount === 12) {
+      const bookLine = OPENING_MOVES[Math.floor(Math.random() * OPENING_MOVES.length)];
+      const bookMove = bookLine[0];
+      const matching = moves.find(m =>
+        m.from.row === bookMove.from.row && m.from.col === bookMove.from.col &&
+        m.to.row === bookMove.to.row && m.to.col === bookMove.to.col
+      );
+      if (matching) return matching;
     }
+  }
+
+  const timeLimit = difficulty === "grandmaster" ? 4000 :
+    difficulty === "master" ? 3000 :
+    difficulty === "expert" ? 2000 :
+    difficulty === "hard" ? 1500 : 1000;
+
+  const bestMove = iterativeDeepening(board, config.depth, botColor, style,
+    config.quiescenceDepth, timeLimit);
+
+  if (!bestMove) return moves[0];
+
+  // Slight randomness for lower levels
+  if (config.randomness > 0 && Math.random() < config.randomness) {
+    const topMoves = moves.slice(0, Math.min(3, moves.length));
+    return topMoves[Math.floor(Math.random() * topMoves.length)];
   }
 
   return bestMove;
 }
 
-// ── Bot Firestore ga yozilishi ────────────────
+// ── Seed bot to Firestore ─────────────────────────────
 export async function seedBotToFirestore(bot: BotProfile): Promise<void> {
   const ref = db().collection("users").doc(bot.uid);
   const snap = await ref.get();
-  if (snap.exists) {
-    // Eski seed'da rating 0 bo'lib qolgan botlarni bir marta to'g'irlaymiz
-    const cur = snap.data()!;
-    if ((cur.rating ?? 0) === 0 && bot.rating !== 0) {
-      await ref.update({ rating: bot.rating, peakRating: Math.max(bot.rating, 0) });
-    }
-    return;
-  }
+  if (snap.exists) return;
 
   await ref.set({
-    uid:              bot.uid,
-    displayName:      bot.displayName,
-    email:            `${bot.uid}@shashka.bot`,
-    photoUrl:         bot.photoUrl,
-    bio:              bot.bio,
-    coins:            5000 + Math.floor(Math.random() * 10000),
-    diamonds:         50  + Math.floor(Math.random() * 100),
-    xp:               bot.xp,
-    level:            bot.level,
-    wins:             bot.wins,
-    losses:           bot.losses,
-    draws:            bot.draws,
-    totalGames:       bot.totalGames,
-    totalCoinsWagered:bot.wins * 200 + bot.losses * 150,
-    totalCoinsWon:    bot.wins * 380,
+    uid: bot.uid, displayName: bot.displayName,
+    email: `${bot.uid}@shashka.bot`, photoUrl: bot.photoUrl,
+    bio: bot.bio, coins: 5000 + Math.floor(Math.random() * 10000),
+    diamonds: 50 + Math.floor(Math.random() * 100),
+    xp: bot.xp, level: bot.level, wins: bot.wins,
+    losses: bot.losses, draws: bot.draws, totalGames: bot.totalGames,
+    totalCoinsWagered: bot.wins * 200, totalCoinsWon: bot.wins * 380,
     currentWinStreak: Math.floor(Math.random() * 5),
     longestWinStreak: Math.floor(bot.wins / 10),
-    rating:           bot.rating,
-    peakRating:       Math.max(bot.rating, 0),
-    clubId:           "",
-    clubName:         "",
-    clubRole:         "MEMBER",
-    equippedSkin:     "default",
-    avatarId:         "avatar_01",
-    unlockedSkins:    ["default"],
-    friendUids:       [],
-    lastDailyClaim:   Date.now() - 3600000,
-    dailyStreak:      Math.floor(Math.random() * 7) + 1,
-    isOnline:         false,
-    isBot:            true,
-    createdAt:        Date.now() - Math.floor(Math.random() * 90 * 86400000),
-    lastSeenAt:       Date.now() - Math.floor(Math.random() * 3600000),
+    rating: bot.rating, peakRating: bot.rating,
+    clubId: "", clubName: "", clubRole: "MEMBER",
+    equippedSkin: "default", avatarId: "avatar_01",
+    unlockedSkins: ["default"], friendUids: [],
+    lastDailyClaim: Date.now() - 3600000,
+    dailyStreak: Math.floor(Math.random() * 7) + 1,
+    isOnline: false, isBot: true,
+    createdAt: Date.now() - Math.floor(Math.random() * 90 * 86400000),
+    lastSeenAt: Date.now() - Math.floor(Math.random() * 3600000),
   });
 }
 
-// ── Yangi format (row_col) bot harakat ───────
-export async function makeBotMoveNewFormat(roomId: string, botColor: string, style: BotStyle, level: number = 10): Promise<void> {
-  const gameStateSnap = await rdb().ref(`rooms/${roomId}/gameState`).get();
-  if (!gameStateSnap.exists()) return;
+// ── Main bot move (new row_col format) ────────────────
+export async function makeBotMoveNewFormat(roomId: string, botColor: string,
+    style: BotStyle, difficulty?: BotDifficulty): Promise<void> {
+  const snap = await rdb().ref(`rooms/${roomId}/gameState`).get();
+  if (!snap.exists()) return;
+  const gs = snap.val();
+  if (!gs || gs.isGameOver || gs.currentTurn !== botColor) return;
 
-  const gs = gameStateSnap.val();
-  if (!gs || gs.isGameOver) return;
-  if (gs.currentTurn !== botColor) return;
-
-  // row_col → 2D board
+  // Parse board
   const board: Board = Array.from({length: 8}, () => Array(8).fill(null));
-
-  const boardData = gs.board || {};
-  for (const [key, val] of Object.entries(boardData)) {
-    const parts = key.split("_");
-    if (parts.length !== 2) continue;
-    const row = parseInt(parts[0]);
-    const col = parseInt(parts[1]);
-    if (isNaN(row) || isNaN(col)) continue;
-    const cellVal = val as { color: string; type: string };
-    board[row][col] = { color: cellVal.color, isKing: cellVal.type === "KING" };
+  for (const [key, val] of Object.entries(gs.board || {})) {
+    const [r, c] = key.split("_").map(Number);
+    if (isNaN(r) || isNaN(c)) continue;
+    const v = val as { color: string; type: string };
+    board[r][c] = { color: v.color, isKing: v.type === "KING" };
   }
 
   const moves = getValidMovesForColor(board, botColor);
@@ -287,39 +495,35 @@ export async function makeBotMoveNewFormat(roomId: string, botColor: string, sty
     return;
   }
 
-  // LEARNING: avval o'z darajasidagi haqiqiy g'oliblar kitobidan qaraymiz,
-  // topilmasa — darajaga mos chuqurlikdagi Minimax
-  // (require — circular import'ning oldini olish uchun)
-  const { getBookMove } = require("./botLearning") as typeof import("./botLearning");
-  let move: Move | null = null;
-  try { move = getBookMove(level, board, botColor, moves); } catch { move = null; }
-  if (move) {
-    console.log(`[bot] level ${level}: playing learned move (from real winners)`);
-  } else {
-    move = selectBotMove(moves, style, board, botColor, depthForLevel(level));
-  }
-  const newBoard = applyMove(board, move);
+  const diff: BotDifficulty = difficulty || styleToDifficulty(style);
+  const move = selectBotMove(moves, style, board, botColor, diff);
+  const newBoard = applyMoveToBoard(board, move);
 
-  // Ketma-ket urish tekshiruvi
-  const continueMoves = move.captured.length > 0
-    ? getValidMovesForColor(newBoard, botColor).filter(
-        m => m.from.row === move!.to.row && m.from.col === move!.to.col && m.captured.length > 0
-      )
-    : [];
-
-  if (continueMoves.length > 0) {
-    // Ketma-ket urishni davom ettirish (bu yerda ham kitobdan qaraymiz)
-    let nextMove: Move | null = null;
-    try { nextMove = getBookMove(level, newBoard, botColor, continueMoves); } catch { nextMove = null; }
-    if (!nextMove) {
-      nextMove = selectBotMove(continueMoves, style, newBoard, botColor, depthForLevel(level));
+  // Chain captures
+  if (move.isCapture) {
+    const piece = newBoard[move.to.row][move.to.col]!;
+    const alreadyCaptured = new Set(move.captured.map(c => `${c.row},${c.col}`));
+    const chainMoves = getChainCaptures(newBoard, move.to, botColor, piece.isKing, alreadyCaptured);
+    if (chainMoves.length > 0) {
+      const chainMove = selectBotMove(chainMoves, style, newBoard, botColor, diff);
+      const finalBoard = applyMoveToBoard(newBoard, chainMove);
+      await saveBoard(finalBoard, botColor, roomId);
+      return;
     }
-    const finalBoard = applyMove(newBoard, nextMove);
-    await saveBoard(finalBoard, botColor, roomId);
-    return;
   }
 
   await saveBoard(newBoard, botColor, roomId);
+}
+
+function styleToDifficulty(style: BotStyle): BotDifficulty {
+  switch (style) {
+    case "beginner": return "beginner";
+    case "random":   return "easy";
+    case "balanced": return "medium";
+    case "aggressive": return "hard";
+    case "defensive":  return "hard";
+    default: return "medium";
+  }
 }
 
 async function saveBoard(board: Board, botColor: string, roomId: string): Promise<void> {
@@ -330,46 +534,21 @@ async function saveBoard(board: Board, botColor: string, roomId: string): Promis
       if (p) newBoardData[`${r}_${c}`] = { color: p.color, type: p.isKing ? "KING" : "MAN" };
     }
   }
-
-  const whitePieces = Object.values(newBoardData).filter(p => p.color === "WHITE").length;
-  const blackPieces = Object.values(newBoardData).filter(p => p.color === "BLACK").length;
-  const isGameOver  = whitePieces === 0 || blackPieces === 0;
-  const winner      = whitePieces === 0 ? "BLACK" : blackPieces === 0 ? "WHITE" : null;
-  const oppColor    = botColor === "WHITE" ? "BLACK" : "WHITE";
+  const whites = Object.values(newBoardData).filter(p => p.color === "WHITE").length;
+  const blacks = Object.values(newBoardData).filter(p => p.color === "BLACK").length;
+  const isGameOver = whites === 0 || blacks === 0;
+  const winner = whites === 0 ? "BLACK" : blacks === 0 ? "WHITE" : null;
+  const opp = botColor === "WHITE" ? "BLACK" : "WHITE";
 
   await rdb().ref(`rooms/${roomId}/gameState`).update({
-    board:      newBoardData,
-    currentTurn: isGameOver ? botColor : oppColor,
-    isGameOver,
-    winner,
+    board: newBoardData,
+    currentTurn: isGameOver ? botColor : opp,
+    isGameOver, winner,
   });
 }
 
-// ── Eski format (2D board) ────────────────────
-export async function makeBotMove(roomId: string, botUid: string, botColor: string, style: BotStyle): Promise<void> {
-  const snap = await rdb().ref(`rooms/${roomId}/gameState`).get();
-  if (!snap.exists) return;
-  const gs = snap.val();
-  if (!gs || gs.isGameOver || gs.currentTurn !== botColor) return;
-
-  const board: Board = gs.board;
-  const moves = getValidMovesForColor(board, botColor);
-  if (moves.length === 0) {
-    await rdb().ref(`rooms/${roomId}/gameState`).update({ isGameOver: true, winner: botColor === "WHITE" ? "BLACK" : "WHITE" });
-    return;
-  }
-
-  const move = selectBotMove(moves, style, board, botColor);
-  const newBoard = applyMove(board, move);
-  const oppColor = botColor === "WHITE" ? "BLACK" : "WHITE";
-  const whites = newBoard.flat().filter(p => p?.color === "WHITE").length;
-  const blacks = newBoard.flat().filter(p => p?.color === "BLACK").length;
-  const gameOver = whites === 0 || blacks === 0;
-
-  await rdb().ref(`rooms/${roomId}/gameState`).update({
-    board: newBoard,
-    currentTurn: oppColor,
-    isGameOver: gameOver,
-    winner: gameOver ? (whites === 0 ? "BLACK" : "WHITE") : null,
-  });
+// Legacy
+export async function makeBotMove(roomId: string, botUid: string,
+    botColor: string, style: BotStyle): Promise<void> {
+  await makeBotMoveNewFormat(roomId, botColor, style);
 }
