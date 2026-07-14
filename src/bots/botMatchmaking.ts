@@ -142,7 +142,7 @@ export function startBotGameListener(): void {
       const currentSnap = await rdb().ref(`rooms/${roomId}/gameState/currentTurn`).get();
       if (currentSnap.val() !== botColor) return;
 
-      await makeBotMoveNewFormat(roomId, botColor, botProfile.style, undefined);
+      await makeBotMoveNewFormat(roomId, botColor, botProfile.style, (botProfile as any).difficulty);
 
       // O'yin tugaganini tekshirish
       const finalGs = await rdb().ref(`rooms/${roomId}/gameState`).get();
