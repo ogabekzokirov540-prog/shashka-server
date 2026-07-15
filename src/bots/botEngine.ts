@@ -102,7 +102,9 @@ export function cloneBoard(board: Board): Board {
 function applyMoveToBoard(board: Board, move: Move): Board {
   const b = cloneBoard(board);
   const piece = b[move.from.row][move.from.col]!;
+  if (!piece) return b;
   b[move.from.row][move.from.col] = null;
+  // Remove all captured pieces
   move.captured.forEach(c => { b[c.row][c.col] = null; });
   const becomeKing = !piece.isKing &&
     ((piece.color === "WHITE" && move.to.row === 0) ||
@@ -174,6 +176,54 @@ function getSimpleMoves(board: Board, from: Position, color: string, isKing: boo
   return result;
 }
 
+// Get all possible capture sequences (chain captures)
+function getAllCaptureSequences(
+  board: Board, from: Position, color: string, isKing: boolean,
+  alreadyCaptured: Set<string>, capturedSoFar: Position[]
+): Move[] {
+  const caps = getCaptures(board, from, color, isKing, alreadyCaptured);
+  if (caps.length === 0) {
+    // End of chain — return accumulated move if we captured something
+    if (capturedSoFar.length > 0) {
+      return [{ from: capturedSoFar.length > 0 ? from : from, to: from, captured: capturedSoFar, isCapture: true }];
+    }
+    return [];
+  }
+
+  const results: Move[] = [];
+  for (const cap of caps) {
+    const newBoard = applyMoveToBoard(board, cap);
+    const newCaptured = new Set(alreadyCaptured);
+    cap.captured.forEach(c => newCaptured.add(`${c.row},${c.col}`));
+    const allCaptured = [...capturedSoFar, ...cap.captured];
+    const piece = newBoard[cap.to.row][cap.to.col]!;
+
+    const chainMoves = getAllCaptureSequences(
+      newBoard, cap.to, color, piece.isKing, newCaptured, allCaptured
+    );
+
+    if (chainMoves.length > 0) {
+      // Continue chain
+      for (const chain of chainMoves) {
+        results.push({
+          from: capturedSoFar.length === 0 ? cap.from : from,
+          to: chain.to,
+          captured: allCaptured,
+          isCapture: true
+        });
+      }
+    } else {
+      results.push({
+        from: capturedSoFar.length === 0 ? cap.from : from,
+        to: cap.to,
+        captured: allCaptured,
+        isCapture: true
+      });
+    }
+  }
+  return results;
+}
+
 export function getValidMovesForColor(board: Board, color: string): Move[] {
   const captures: Move[] = [];
   const simples: Move[] = [];
@@ -183,9 +233,12 @@ export function getValidMovesForColor(board: Board, color: string): Move[] {
       const piece = board[r][c];
       if (!piece || piece.color !== color) continue;
       const from = { row: r, col: c };
-      const caps = getCaptures(board, from, color, piece.isKing, new Set());
-      captures.push(...caps);
-      if (caps.length === 0) {
+
+      // Get all capture sequences including chains
+      const capSequences = getAllCaptureSequences(board, from, color, piece.isKing, new Set(), []);
+      captures.push(...capSequences);
+
+      if (capSequences.length === 0) {
         simples.push(...getSimpleMoves(board, from, color, piece.isKing));
       }
     }
@@ -526,19 +579,6 @@ export async function makeBotMoveNewFormat(roomId: string, botColor: string,
   const diff: BotDifficulty = difficulty || styleToDifficulty(style);
   const move = selectBotMove(moves, style, board, botColor, diff);
   const newBoard = applyMoveToBoard(board, move);
-
-  // Chain captures
-  if (move.isCapture) {
-    const piece = newBoard[move.to.row][move.to.col]!;
-    const alreadyCaptured = new Set(move.captured.map(c => `${c.row},${c.col}`));
-    const chainMoves = getChainCaptures(newBoard, move.to, botColor, piece.isKing, alreadyCaptured);
-    if (chainMoves.length > 0) {
-      const chainMove = selectBotMove(chainMoves, style, newBoard, botColor, diff);
-      const finalBoard = applyMoveToBoard(newBoard, chainMove);
-      await saveBoard(finalBoard, botColor, roomId);
-      return;
-    }
-  }
 
   await saveBoard(newBoard, botColor, roomId);
 }
