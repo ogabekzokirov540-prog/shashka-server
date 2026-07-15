@@ -235,7 +235,7 @@ export function getValidMovesForColor(board: Board, color: string): Move[] {
       const from = { row: r, col: c };
 
       // Get all capture sequences including chains
-      const capSequences = getAllCaptureSequences(board, from, from, color, piece.isKing, new Set());
+      const capSequences = getAllCaptureSequences(board, from, from, color, piece.isKing, new Set<string>());
       captures.push(...capSequences);
 
       if (capSequences.length === 0) {
