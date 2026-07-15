@@ -179,7 +179,7 @@ function getSimpleMoves(board: Board, from: Position, color: string, isKing: boo
 // Get all possible capture sequences (chain captures)
 function getAllCaptureSequences(
   board: Board, from: Position, color: string, isKing: boolean,
-  alreadyCaptured: Set<string>, capturedSoFar: Position[]
+  alreadyCaptured: Set<string>, capturedSoFar: Position[] = []
 ): Move[] {
   const caps = getCaptures(board, from, color, isKing, alreadyCaptured);
   if (caps.length === 0) {
@@ -235,7 +235,7 @@ export function getValidMovesForColor(board: Board, color: string): Move[] {
       const from = { row: r, col: c };
 
       // Get all capture sequences including chains
-      const capSequences = getAllCaptureSequences(board, from, from, color, piece.isKing, new Set(), []);
+      const capSequences = getAllCaptureSequences(board, from, from, color, piece.isKing, new Set());
       captures.push(...capSequences);
 
       if (capSequences.length === 0) {
