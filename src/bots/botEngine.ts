@@ -32,13 +32,13 @@ const DIFFICULTY_CONFIG: Record<BotDifficulty, {
   quiescenceDepth: number;
   useOpeningBook: boolean;
 }> = {
-  beginner:    { depth: 1, mistakeRate: 0.50, randomness: 0.6,  quiescenceDepth: 0, useOpeningBook: false },
-  easy:        { depth: 2, mistakeRate: 0.30, randomness: 0.35, quiescenceDepth: 1, useOpeningBook: false },
-  medium:      { depth: 4, mistakeRate: 0.10, randomness: 0.15, quiescenceDepth: 2, useOpeningBook: true  },
-  hard:        { depth: 6, mistakeRate: 0.03, randomness: 0.05, quiescenceDepth: 3, useOpeningBook: true  },
-  expert:      { depth: 8, mistakeRate: 0.01, randomness: 0.02, quiescenceDepth: 4, useOpeningBook: true  },
-  master:      { depth:10, mistakeRate: 0.00, randomness: 0.01, quiescenceDepth: 5, useOpeningBook: true  },
-  grandmaster: { depth:12, mistakeRate: 0.00, randomness: 0.00, quiescenceDepth: 6, useOpeningBook: true  },
+  beginner:    { depth: 2, mistakeRate: 0.25, randomness: 0.3,  quiescenceDepth: 0, useOpeningBook: false },
+  easy:        { depth: 3, mistakeRate: 0.10, randomness: 0.15, quiescenceDepth: 1, useOpeningBook: false },
+  medium:      { depth: 5, mistakeRate: 0.03, randomness: 0.05, quiescenceDepth: 2, useOpeningBook: true  },
+  hard:        { depth: 7, mistakeRate: 0.01, randomness: 0.02, quiescenceDepth: 3, useOpeningBook: true  },
+  expert:      { depth: 9, mistakeRate: 0.00, randomness: 0.01, quiescenceDepth: 4, useOpeningBook: true  },
+  master:      { depth:11, mistakeRate: 0.00, randomness: 0.00, quiescenceDepth: 5, useOpeningBook: true  },
+  grandmaster: { depth:13, mistakeRate: 0.00, randomness: 0.00, quiescenceDepth: 6, useOpeningBook: true  },
 };
 
 // ── Zobrist Hashing ───────────────────────────────────
@@ -235,7 +235,7 @@ export function getValidMovesForColor(board: Board, color: string): Move[] {
       const from = { row: r, col: c };
 
       // Get all capture sequences including chains
-      const capSequences = getAllCaptureSequences(board, from, color, piece.isKing, new Set(), []);
+      const capSequences = getAllCaptureSequences(board, from, from, color, piece.isKing, new Set(), []);
       captures.push(...capSequences);
 
       if (capSequences.length === 0) {
@@ -503,10 +503,12 @@ export function selectBotMove(moves: Move[], style: BotStyle, board: Board,
     }
   }
 
-  const timeLimit = difficulty === "grandmaster" ? 4000 :
-    difficulty === "master" ? 3000 :
-    difficulty === "expert" ? 2000 :
-    difficulty === "hard" ? 1500 : 1000;
+  const timeLimit = difficulty === "grandmaster" ? 8000 :
+    difficulty === "master" ? 6000 :
+    difficulty === "expert" ? 4000 :
+    difficulty === "hard" ? 3000 :
+    difficulty === "medium" ? 2000 :
+    difficulty === "easy" ? 1000 : 500;
 
   const bestMove = iterativeDeepening(board, config.depth, botColor, style,
     config.quiescenceDepth, timeLimit);
